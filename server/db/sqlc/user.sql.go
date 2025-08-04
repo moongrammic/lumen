@@ -168,6 +168,24 @@ func (q *Queries) GetUserByID(ctx context.Context, id pgtype.UUID) (GetUserByIDR
 	return i, err
 }
 
+const isWorkspaceMember = `-- name: IsWorkspaceMember :one
+SELECT EXISTS(
+  SELECT 1 FROM members WHERE user_id = $1 AND workspace_id = $2
+)
+`
+
+type IsWorkspaceMemberParams struct {
+	UserID      pgtype.UUID
+	WorkspaceID pgtype.UUID
+}
+
+func (q *Queries) IsWorkspaceMember(ctx context.Context, arg IsWorkspaceMemberParams) (bool, error) {
+	row := q.db.QueryRow(ctx, isWorkspaceMember, arg.UserID, arg.WorkspaceID)
+	var exists bool
+	err := row.Scan(&exists)
+	return exists, err
+}
+
 const listUserWorkspaces = `-- name: ListUserWorkspaces :many
 SELECT w.id, w.name, w.owner_id, w.icon_url, w.is_public, w.description, w.tags, w.welcome_channel_id, w.welcome_message_template, w.created_at FROM workspaces w
 JOIN members m ON w.id = m.workspace_id

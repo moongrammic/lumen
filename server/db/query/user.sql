@@ -38,3 +38,8 @@ RETURNING *;
 SELECT w.* FROM workspaces w
 JOIN members m ON w.id = m.workspace_id
 WHERE m.user_id = $1;
+
+-- name: IsWorkspaceMember :one
+SELECT EXISTS(
+  SELECT 1 FROM members WHERE user_id = $1 AND workspace_id = $2
+);

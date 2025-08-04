@@ -75,8 +75,16 @@ func main() {
 			r.Use(authMiddleware) // Применяем наш "охранник" ко всей группе
 
 			r.Get("/me", meHandler(queries))
+
+			// Роуты для пространств
 			r.Post("/workspaces", createWorkspaceHandler(queries))
 			r.Get("/workspaces", listWorkspacesHandler(queries))
+
+			// 👇 Наши новые вложенные роуты для каналов
+			r.Route("/workspaces/{workspaceID}", func(r chi.Router) {
+				r.Post("/channels", createChannelHandler(queries))
+				r.Get("/channels", listChannelsHandler(queries))
+			})
 		})
 	})
 
@@ -127,7 +135,7 @@ func registerHandler(queries *db.Queries) http.HandlerFunc {
 	}
 }
 
-// loginHandler - это наш обработчик запроса на вход
+// loginHandler - это наш обработчик запроса на вход (ИСПРАВЛЕННАЯ ВЕРСИЯ)
 func loginHandler(queries *db.Queries) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		// 1. Парсим JSON
@@ -137,33 +145,29 @@ func loginHandler(queries *db.Queries) http.HandlerFunc {
 			return
 		}
 
-		// 2. Находим пользователя по email с помощью sqlc
+		// 2. Находим пользователя по email
 		user, err := queries.GetUserByEmail(r.Context(), req.Email)
 		if err != nil {
-			// Пользователь не найден
 			http.Error(w, "Неверный email или пароль", http.StatusUnauthorized)
 			return
 		}
 
-		// 3. Сравниваем хеш из базы с паролем из запроса
+		// 3. Сравниваем хеш пароля
 		if err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash.String), []byte(req.Password)); err != nil {
-			// Пароли не совпадают
 			http.Error(w, "Неверный email или пароль", http.StatusUnauthorized)
 			return
 		}
 
-		// 4. Преобразуем pgtype.UUID в строку
-		userIDBytes, err := user.ID.Value()
-		if err != nil {
-			http.Error(w, "Ошибка обработки ID пользователя", http.StatusInternalServerError)
-			return
-		}
-		userIDString := fmt.Sprintf("%x", userIDBytes) // Преобразуем в строку вида "6e5c1f3c61fe462cac07d54298d60d7e"
+		// 4. ПРАВИЛЬНОЕ преобразование pgtype.UUID в строку
+		// Создаем google/uuid.UUID из байтов, которые хранятся в pgtype.UUID
+		userID := uuid.UUID(user.ID.Bytes)
+		// Теперь получаем стандартную строку с дефисами
+		userIDString := userID.String()
 
-		// 5. Генерируем JWT-токен с user_id как строкой
+		// 5. Генерируем JWT-токен
 		token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
 			"user_id": userIDString,
-			"exp":     time.Now().Add(time.Hour * 72).Unix(), // Токен действителен 72 часа
+			"exp":     time.Now().Add(time.Hour * 72).Unix(),
 		})
 
 		tokenString, err := token.SignedString(jwtSecret)
@@ -207,6 +211,8 @@ func authMiddleware(next http.Handler) http.Handler {
 		})
 
 		if err != nil || !token.Valid {
+			// Добавляем лог, чтобы видеть настоящую причину ошибки в консоли сервера
+			log.Printf("Ошибка валидации токена: %v", err)
 			http.Error(w, "Невалидный токен", http.StatusUnauthorized)
 			return
 		}
@@ -265,6 +271,12 @@ func meHandler(queries *db.Queries) http.HandlerFunc {
 // --- Добавляем обработчики для workspaces ---
 type CreateWorkspaceRequest struct {
 	Name string `json:"name"`
+}
+
+// CreateChannelRequest определяет структуру JSON-тела для запроса на создание канала
+type CreateChannelRequest struct {
+	Name string             `json:"name"`
+	Type db.NullChannelType `json:"type"` // Используем тип из sqlc
 }
 
 func createWorkspaceHandler(queries *db.Queries) http.HandlerFunc {
@@ -339,5 +351,128 @@ func listWorkspacesHandler(queries *db.Queries) http.HandlerFunc {
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(workspaces)
+	}
+}
+
+func createChannelHandler(queries *db.Queries) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		// 1. Получаем ID из URL и контекста
+		workspaceIDString := chi.URLParam(r, "workspaceID")
+		workspaceID, err := uuid.Parse(workspaceIDString)
+		if err != nil {
+			http.Error(w, "Неверный формат ID пространства", http.StatusBadRequest)
+			return
+		}
+		var pgWorkspaceID pgtype.UUID
+		pgWorkspaceID = pgtype.UUID{
+			Bytes: workspaceID,
+			Valid: true,
+		}
+
+		userIDString := r.Context().Value(UserIDKey).(string)
+		userID, err := uuid.Parse(userIDString)
+		if err != nil {
+			http.Error(w, "Неверный формат ID пользователя", http.StatusInternalServerError)
+			return
+		}
+		var pgUserID pgtype.UUID
+		pgUserID = pgtype.UUID{
+			Bytes: userID,
+			Valid: true,
+		}
+
+		// 2. Проверяем, является ли пользователь участником этого пространства
+		isMember, err := queries.IsWorkspaceMember(r.Context(), db.IsWorkspaceMemberParams{UserID: pgUserID, WorkspaceID: pgWorkspaceID})
+		if err != nil || !isMember {
+			http.Error(w, "Доступ запрещен", http.StatusForbidden)
+			return
+		}
+
+		// 3. Парсим тело запроса с временной структурой
+		type TempChannelRequest struct {
+			Name string `json:"name"`
+			Type string `json:"type"` // Временная строка
+		}
+		var tempReq TempChannelRequest
+		if err := json.NewDecoder(r.Body).Decode(&tempReq); err != nil {
+			http.Error(w, "Неверный формат запроса", http.StatusBadRequest)
+			return
+		}
+
+		// 4. Преобразуем type в db.NullChannelType
+		var channelType db.NullChannelType
+		if tempReq.Type != "" {
+			switch strings.ToUpper(tempReq.Type) {
+			case "TEXT":
+				channelType = db.NullChannelType{ChannelType: db.ChannelTypeTEXT, Valid: true}
+			case "VOICE":
+				channelType = db.NullChannelType{ChannelType: db.ChannelTypeVOICE, Valid: true}
+			default:
+				http.Error(w, "Недопустимый тип канала", http.StatusBadRequest)
+				return
+			}
+		} else {
+			channelType = db.NullChannelType{ChannelType: db.ChannelTypeTEXT, Valid: true} // Значение по умолчанию
+		}
+
+		// 5. Создаем канал
+		params := db.CreateChannelParams{
+			WorkspaceID: pgWorkspaceID,
+			Name:        tempReq.Name,
+			Type:        channelType.ChannelType,
+		}
+		channel, err := queries.CreateChannel(r.Context(), params)
+		if err != nil {
+			http.Error(w, "Не удалось создать канал", http.StatusInternalServerError)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		json.NewEncoder(w).Encode(channel)
+	}
+}
+
+func listChannelsHandler(queries *db.Queries) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		workspaceIDString := chi.URLParam(r, "workspaceID")
+		workspaceID, err := uuid.Parse(workspaceIDString)
+		if err != nil {
+			http.Error(w, "Неверный формат ID пространства", http.StatusBadRequest)
+			return
+		}
+		var pgWorkspaceID pgtype.UUID
+		pgWorkspaceID = pgtype.UUID{
+			Bytes: workspaceID,
+			Valid: true,
+		}
+
+		userIDString := r.Context().Value(UserIDKey).(string)
+		userID, err := uuid.Parse(userIDString)
+		if err != nil {
+			http.Error(w, "Неверный формат ID пользователя", http.StatusInternalServerError)
+			return
+		}
+		var pgUserID pgtype.UUID
+		pgUserID = pgtype.UUID{
+			Bytes: userID,
+			Valid: true,
+		}
+
+		// Проверяем, является ли пользователь участником этого пространства
+		isMember, err := queries.IsWorkspaceMember(r.Context(), db.IsWorkspaceMemberParams{UserID: pgUserID, WorkspaceID: pgWorkspaceID})
+		if err != nil || !isMember {
+			http.Error(w, "Доступ запрещен", http.StatusForbidden)
+			return
+		}
+
+		channels, err := queries.ListWorkspaceChannels(r.Context(), pgWorkspaceID)
+		if err != nil {
+			http.Error(w, "Не удалось получить список каналов", http.StatusInternalServerError)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(channels)
 	}
 }
