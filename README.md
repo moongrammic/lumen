@@ -1,63 +1,69 @@
-# 🌌 Lumen — Self-Hosted Discord Alternative
+# 🌌 Lumen
 
 ![Lumen Banner](<img width="2000" height="2000" alt="lumen" src="https://github.com/user-attachments/assets/3521d5b9-956f-475d-893b-8ee9c68bd9e7" />)
 
-**Lumen** — это современная, высокопроизводительная платформа для общения с открытым исходным кодом. Полный контроль над данными, безопасность и скорость Go в сочетании с гибкостью Next.js 15.
+**Lumen** — современная self-hosted чат-платформа, вдохновленная Discord.  
+Проект находится в стадии активной разработки (MVP).
+
+## 🚀 Текущий статус
+
+На данный момент реализовано ядро бэкенда:
+- **Auth:** middleware для проверки JWT и защиты маршрутов.
+- **Guilds:** создание серверов и вступление по инвайт-коду.
+- **Messages API:** чтение истории сообщений с проверкой доступа к гильдии.
+- **WebSocket Gateway:** события реального времени (`MESSAGE_CREATE`, `TYPING_START`, `PRESENCE_UPDATE`, `VOICE_STATE_UPDATE`).
+- **Real-time Engine:** Redis Pub/Sub + presence-статусы через Redis TTL.
+- **Voice:** эндпоинт генерации LiveKit join-токена.
+- **Database:** SQL-миграции в `backend/migrations`.
+
+**В разработке:**
+- полный цикл авторизации (регистрация и логин);
+- CRUD текстовых и голосовых каналов;
+- UI/API для управления гильдиями;
+- фронтенд на Next.js 15.
+
+## 🛠 Технологический стек
+
+- **Backend:** Go (Fiber), PostgreSQL (GORM), Redis.
+- **Real-time:** WebSocket Gateway.
+- **Voice/Video:** LiveKit (интеграция токенов).
+- **DevOps:** Docker Compose, Makefile.
+
+## 📦 Быстрый старт
+
+```bash
+# 1. Клонируйте репозиторий
+git clone https://github.com/moongrammic/lumen.git
+cd lumen
+
+# 2. Настройте конфигурацию (JWT_SECRET, ключи LiveKit и т.д.)
+cp backend/.env.example backend/.env
+
+# 3. Запустите инфраструктуру
+make up
+
+# 4. Примените миграции БД
+make migrate
+
+# 5. Просмотр логов бэкенда
+make logs
+```
+
+Доступные адреса:
+- Backend API + WebSocket: `http://localhost:8080`
+- Frontend: в разработке
+
+## 📋 Полезные команды
+
+- `make up` — запустить сервисы в Docker.
+- `make down` — остановить сервисы.
+- `make build` — пересобрать контейнеры.
+- `make migrate` — применить SQL-миграции (up).
+- `make migrate-down` — откатить миграции (down).
+
+## ⚙️ Переменные окружения
+
+Используйте `backend/.env.example` как источник актуальных переменных для локального запуска.
 
 ---
-
-### 🚀 Технологический Стек
-
-| Слой | Технологии |
-| :--- | :--- |
-| **Backend** | **Go 1.23+**, Fiber v2, GORM v2 (PostgreSQL), Redis (Pub/Sub) |
-| **Real-time** | WebSocket (Gateway pattern), LiveKit (Voice/Video) |
-| **Frontend** | **Next.js 15 (App Router)**, TypeScript, Tailwind CSS, shadcn/ui |
-| **State** | TanStack Query v5, Zustand |
-| **Infrastructure** | Docker & Compose, **golang-migrate**, S3 (MinIO) |
-
----
-
-### ✅ Что уже реализовано (Backend Core)
-
-- [x] **Gateway Architecture:** WebSocket шлюз с поддержкой OpCodes (`MESSAGE_CREATE`, `TYPING_START`, `PRESENCE_UPDATE`).
-- [x] **Real-time Engine:** Синхронизация состояний через **Redis Pub/Sub** (Online/Offline статусы с TTL).
-- [x] **Domain Logic:**
-    - **Guilds & Channels:** Создание серверов, каналов и вступление по инвайтам.
-    - **Permissions:** Система прав на основе **Bitmask** (Permissions uint64).
-    - **Messages:** Персистентное хранение с поддержкой **Attachments**.
-- [x] **Voice Core:** Интеграция с **LiveKit SDK** для генерации Room Tokens.
-- [x] **Infrastructure:** Чистый конфиг (`cleanenv`), логирование (`slog`) и SQL-миграции.
-
----
-
-### 🛠 В процессе (Ближайшие задачи)
-
-- [ ] **Gateway Events:** Переход к типизированным событиям (`MESSAGE_CREATE`, `PRESENCE_UPDATE`, `TYPING_START`).
-- [ ] **Voice Engine:** Интеграция **LiveKit** (генерация токенов доступа для голосовых комнат).
-- [ ] **Permissions:** Система ролей и битовых масок прав доступа (Manage Channels, Send Messages и т.д.).
-- [ ] **Migration System:** Переход с AutoMigrate на контролируемые SQL-миграции (`golang-migrate`).
-- [ ] **Frontend Bootstrap:** Инициализация Next.js приложения и базовый интерфейс чата.
-
----
-
-### 📈 Roadmap
-
-1.  **Phase 1: Foundation (Current)** — Стабильный API, Auth, Базовый чат и Websocket Gateway.
-2.  **Phase 2: Media & Voice** — Интеграция LiveKit, загрузка вложений в S3-совместимое хранилище (MinIO).
-3.  **Phase 3: Social & UX** — Список друзей, личные сообщения (DM), реакции, эмодзи и поиск.
-4.  **Phase 4: Scaling** — Модерация (Kick/Ban), аудит-логи, поддержка Kubernetes и мобильная адаптация.
-
----
-
-### 📦 Быстрый старт
-
-**1. Подготовка окружения:**
-Создайте файл `.env` в папке `backend/` на основе примера:
-```env
-DB_HOST=postgres
-DB_USER=lumen
-DB_PASSWORD=lumen
-DB_NAME=lumen
-JWT_SECRET=your_super_secret_key
-REDIS_ADDR=redis:6379
+Lumen — Built for privacy, engineered for speed.
