@@ -2,16 +2,13 @@ package middleware
 
 import (
 	"lumen/pkg/apierr"
-	"os"
 	"strings"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/golang-jwt/jwt/v5"
 )
 
-func JWTProtected() fiber.Handler {
-	secret := os.Getenv("JWT_SECRET")
-
+func JWTProtected(secret string) fiber.Handler {
 	return func(c *fiber.Ctx) error {
 		if secret == "" {
 			return apierr.Write(c, fiber.StatusInternalServerError, "jwt_not_configured", "JWT secret is not configured")

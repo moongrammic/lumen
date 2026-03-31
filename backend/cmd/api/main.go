@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"lumen/internal/config"
 	"lumen/internal/middleware"
 	"lumen/internal/repository"
 	"lumen/internal/service"
@@ -24,9 +25,14 @@ import (
 
 func main() {
 	validate := validator.New()
+	cfg, err := config.Load()
+	if err != nil {
+		slog.Error("failed to load config", "error", err)
+		os.Exit(1)
+	}
 
 	// 1. Инициализация БД
-	db, err := repository.InitDB()
+	db, err := repository.InitDB(cfg.DB)
 	if err != nil {
 		slog.Error("failed to connect to database", "error", err)
 		os.Exit(1)
@@ -51,15 +57,16 @@ func main() {
 
 	// 3. Роуты
 	api := app.Group("/api")
-	hub := ws.NewHub()
+	hub := ws.NewHub(cfg.Redis)
 	chatService := service.NewChatService(messageRepo, hub)
+	voiceService := service.NewVoiceService(guildRepo, hub, cfg.LiveKit.APIKey, cfg.LiveKit.APISecret)
 	go hub.Run()
 
 	api.Get("/health", func(c *fiber.Ctx) error {
 		return c.JSON(fiber.Map{"status": "ok", "db": "connected"})
 	})
 
-	api.Get("/me", middleware.JWTProtected(), func(c *fiber.Ctx) error {
+	api.Get("/me", middleware.JWTProtected(cfg.JWT.Secret), func(c *fiber.Ctx) error {
 		userID, err := middleware.ExtractUserIDFromClaims(c.Locals("user"))
 		if err != nil {
 			return apierr.Write(c, fiber.StatusUnauthorized, "invalid_token_claims", err.Error())
@@ -76,7 +83,7 @@ func main() {
 		return c.JSON(me)
 	})
 
-	api.Post("/guilds", middleware.JWTProtected(), func(c *fiber.Ctx) error {
+	api.Post("/guilds", middleware.JWTProtected(cfg.JWT.Secret), func(c *fiber.Ctx) error {
 		var req CreateGuildDTO
 		if err := c.BodyParser(&req); err != nil {
 			return apierr.Write(c, fiber.StatusBadRequest, "invalid_body", "Некорректный JSON запроса")
@@ -97,7 +104,7 @@ func main() {
 		return c.Status(fiber.StatusCreated).JSON(guild)
 	})
 
-	api.Post("/guilds/join", middleware.JWTProtected(), func(c *fiber.Ctx) error {
+	api.Post("/guilds/join", middleware.JWTProtected(cfg.JWT.Secret), func(c *fiber.Ctx) error {
 		var req JoinGuildDTO
 		if err := c.BodyParser(&req); err != nil {
 			return apierr.Write(c, fiber.StatusBadRequest, "invalid_body", "Некорректный JSON запроса")
@@ -121,7 +128,7 @@ func main() {
 		return c.JSON(guild)
 	})
 
-	api.Get("/guilds/:guildID/channels/:channelID/messages", middleware.JWTProtected(), middleware.GuildAccess(guildRepo), func(c *fiber.Ctx) error {
+	api.Get("/guilds/:guildID/channels/:channelID/messages", middleware.JWTProtected(cfg.JWT.Secret), middleware.GuildAccess(guildRepo), func(c *fiber.Ctx) error {
 		guildID, err := strconv.ParseUint(c.Params("guildID"), 10, 32)
 		if err != nil {
 			return apierr.Write(c, fiber.StatusBadRequest, "invalid_guild_id", "Guild ID has invalid format")
@@ -167,7 +174,59 @@ func main() {
 		return c.JSON(result)
 	})
 
-	app.Get("/ws", middleware.JWTProtected(), limiter.New(limiter.Config{
+	api.Post("/voice/join-token", middleware.JWTProtected(cfg.JWT.Secret), func(c *fiber.Ctx) error {
+		var req VoiceJoinTokenDTO
+		if err := c.BodyParser(&req); err != nil {
+			return apierr.Write(c, fiber.StatusBadRequest, "invalid_body", "Некорректный JSON запроса")
+		}
+		if err := validate.Struct(req); err != nil {
+			return apierr.Write(c, fiber.StatusBadRequest, "validation_failed", err.Error())
+		}
+
+		userID, err := middleware.ExtractUserIDFromClaims(c.Locals("user"))
+		if err != nil {
+			return apierr.Write(c, fiber.StatusUnauthorized, "invalid_token_claims", err.Error())
+		}
+
+		token, err := voiceService.JoinRoom(c.UserContext(), userID, req.GuildID, req.RoomName)
+		if err != nil {
+			if err.Error() == "voice access denied" {
+				return apierr.Write(c, fiber.StatusForbidden, "voice_access_denied", "Пользователь не состоит в гильдии")
+			}
+			return apierr.Write(c, fiber.StatusBadRequest, "voice_token_failed", err.Error())
+		}
+
+		return c.JSON(fiber.Map{
+			"token":       token,
+			"livekit_url": cfg.LiveKit.URL,
+		})
+	})
+
+	api.Post("/voice/leave", middleware.JWTProtected(cfg.JWT.Secret), func(c *fiber.Ctx) error {
+		var req VoiceLeaveDTO
+		if err := c.BodyParser(&req); err != nil {
+			return apierr.Write(c, fiber.StatusBadRequest, "invalid_body", "Некорректный JSON запроса")
+		}
+		if err := validate.Struct(req); err != nil {
+			return apierr.Write(c, fiber.StatusBadRequest, "validation_failed", err.Error())
+		}
+
+		userID, err := middleware.ExtractUserIDFromClaims(c.Locals("user"))
+		if err != nil {
+			return apierr.Write(c, fiber.StatusUnauthorized, "invalid_token_claims", err.Error())
+		}
+
+		if err := voiceService.LeaveRoom(c.UserContext(), userID, req.GuildID, req.RoomName); err != nil {
+			if err.Error() == "voice access denied" {
+				return apierr.Write(c, fiber.StatusForbidden, "voice_access_denied", "Пользователь не состоит в гильдии")
+			}
+			return apierr.Write(c, fiber.StatusBadRequest, "voice_leave_failed", err.Error())
+		}
+
+		return c.JSON(fiber.Map{"ok": true})
+	})
+
+	app.Get("/ws", middleware.JWTProtected(cfg.JWT.Secret), limiter.New(limiter.Config{
 		Max:        30,
 		Expiration: 60 * time.Second,
 	}), websocket.New(func(c *websocket.Conn) {
@@ -179,6 +238,10 @@ func main() {
 
 		hub.Register(c)
 		defer hub.Unregister(c)
+		_ = chatService.UpdatePresence(context.Background(), userID, "online", cfg.Presence.TTL)
+		defer func() {
+			_ = chatService.UpdatePresence(context.Background(), userID, "offline", 5*time.Second)
+		}()
 
 		for {
 			_, msg, readErr := c.ReadMessage()
@@ -196,12 +259,8 @@ func main() {
 	}))
 
 	// 4. Запуск
-	port := os.Getenv("PORT")
-	if port == "" {
-		port = "8080"
-	}
-	if err := app.Listen(":" + port); err != nil {
-		slog.Error("fiber listen failed", "port", port, "error", err)
+	if err := app.Listen(":" + cfg.App.Port); err != nil {
+		slog.Error("fiber listen failed", "port", cfg.App.Port, "error", err)
 		os.Exit(1)
 	}
 }
@@ -212,4 +271,14 @@ type CreateGuildDTO struct {
 
 type JoinGuildDTO struct {
 	InviteCode string `json:"invite_code" validate:"required,min=6,max=64"`
+}
+
+type VoiceJoinTokenDTO struct {
+	GuildID  uint   `json:"guild_id" validate:"required"`
+	RoomName string `json:"room_name" validate:"required,min=2,max=128"`
+}
+
+type VoiceLeaveDTO struct {
+	GuildID  uint   `json:"guild_id" validate:"required"`
+	RoomName string `json:"room_name" validate:"required,min=2,max=128"`
 }

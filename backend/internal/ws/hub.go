@@ -5,7 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
-	"os"
+	"lumen/internal/config"
+	"time"
 
 	"github.com/gofiber/contrib/websocket"
 	"github.com/redis/go-redis/v9"
@@ -22,17 +23,7 @@ type Hub struct {
 	channel    string
 }
 
-func NewHub() *Hub {
-	redisAddr := os.Getenv("REDIS_ADDR")
-	if redisAddr == "" {
-		redisAddr = "redis:6379"
-	}
-
-	redisChannel := os.Getenv("REDIS_CHANNEL")
-	if redisChannel == "" {
-		redisChannel = "lumen:chat"
-	}
-
+func NewHub(cfg config.RedisConfig) *Hub {
 	return &Hub{
 		ctx:        context.Background(),
 		clients:    make(map[*websocket.Conn]bool),
@@ -40,8 +31,8 @@ func NewHub() *Hub {
 		unregister: make(chan *websocket.Conn),
 		broadcast:  make(chan []byte),
 		incoming:   make(chan []byte),
-		redis:      redis.NewClient(&redis.Options{Addr: redisAddr}),
-		channel:    redisChannel,
+		redis:      redis.NewClient(&redis.Options{Addr: cfg.Addr, Password: cfg.Password, DB: cfg.DB}),
+		channel:    cfg.Channel,
 	}
 }
 
@@ -113,4 +104,9 @@ func (h *Hub) Broadcast(event any) error {
 	default:
 		return errors.New("hub broadcast queue is full")
 	}
+}
+
+func (h *Hub) SetPresence(ctx context.Context, userID string, status string, ttl time.Duration) error {
+	key := "presence:user:" + userID
+	return h.redis.Set(ctx, key, status, ttl).Err()
 }

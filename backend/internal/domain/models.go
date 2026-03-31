@@ -5,6 +5,12 @@ import (
 	"gorm.io/gorm"
 )
 
+const (
+	PermSendMessages uint64 = 1 << iota
+	PermManageChannels
+	PermManageGuild
+)
+
 type User struct {
 	gorm.Model
 	ID       uuid.UUID `gorm:"type:uuid;primaryKey"`
@@ -23,9 +29,10 @@ type Guild struct {
 
 type GuildMember struct {
 	gorm.Model
-	GuildID uint      `gorm:"index;not null"`
-	UserID  uuid.UUID `gorm:"type:uuid;index;not null"`
-	Role    string    `gorm:"not null;default:member"`
+	GuildID     uint      `gorm:"index;not null"`
+	UserID      uuid.UUID `gorm:"type:uuid;index;not null"`
+	Role        string    `gorm:"not null;default:member"`
+	Permissions uint64    `gorm:"not null;default:1"`
 }
 
 type Channel struct {
@@ -37,8 +44,15 @@ type Channel struct {
 
 type Message struct {
 	gorm.Model
-	Content   string `gorm:"not null"`
-	UserID    uuid.UUID
-	User      User
-	ChannelID uint
+	Content     string `gorm:"not null"`
+	UserID      uuid.UUID
+	User        User
+	ChannelID   uint
+	Attachments []Attachment `gorm:"foreignKey:MessageID"`
+}
+
+type Attachment struct {
+	gorm.Model
+	MessageID uint   `gorm:"index;not null"`
+	URL       string `gorm:"not null"`
 }

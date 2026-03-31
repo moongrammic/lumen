@@ -23,6 +23,7 @@ func (r *MessageRepository) Create(ctx context.Context, message *domain.Message)
 	var created domain.Message
 	if err := r.db.WithContext(ctx).
 		Preload("User").
+		Preload("Attachments").
 		First(&created, message.ID).Error; err != nil {
 		return nil, err
 	}
@@ -42,6 +43,7 @@ func (r *MessageRepository) ListByChannel(
 
 	query := r.db.WithContext(ctx).
 		Preload("User").
+		Preload("Attachments").
 		Where("channel_id = ?", channelID).
 		Order("id DESC").
 		Limit(limit + 1)

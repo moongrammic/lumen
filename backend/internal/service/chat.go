@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"lumen/internal/domain"
+	"time"
 
 	"github.com/google/uuid"
 )
@@ -16,6 +17,7 @@ type ChatRepository interface {
 
 type ChatBroadcaster interface {
 	Broadcast(event any) error
+	SetPresence(ctx context.Context, userID string, status string, ttl time.Duration) error
 }
 
 type ChatService struct {
@@ -30,25 +32,37 @@ type AuthorDTO struct {
 }
 
 type MessagePayload struct {
-	ID        uint      `json:"id"`
-	ChannelID uint      `json:"channel_id"`
-	Content   string    `json:"content"`
-	Author    AuthorDTO `json:"author"`
+	ID          uint      `json:"id"`
+	ChannelID   uint      `json:"channel_id"`
+	Content     string    `json:"content"`
+	Author      AuthorDTO `json:"author"`
+	Attachments []string  `json:"attachments"`
 }
 
 type Event struct {
-	Type    string      `json:"type"`
+	Op      int         `json:"op"`
+	Event   string      `json:"event"`
 	Payload interface{} `json:"payload"`
 }
 
 type IncomingEvent struct {
-	Type    string          `json:"type"`
+	Op      int             `json:"op"`
+	Event   string          `json:"event"`
 	Payload json.RawMessage `json:"payload"`
 }
 
 type IncomingMessageCreatePayload struct {
 	ChannelID uint   `json:"channel_id"`
 	Content   string `json:"content"`
+}
+
+type IncomingTypingPayload struct {
+	ChannelID uint `json:"channel_id"`
+}
+
+type PresencePayload struct {
+	UserID string `json:"user_id"`
+	Status string `json:"status"`
 }
 
 type ListMessagesResult struct {
@@ -69,8 +83,8 @@ func (s *ChatService) HandleIncomingEvent(ctx context.Context, authorID uuid.UUI
 		return ErrInvalidMessagePayload
 	}
 
-	switch incoming.Type {
-	case "message_create":
+	switch incoming.Event {
+	case "MESSAGE_CREATE":
 		var payload IncomingMessageCreatePayload
 		if err := json.Unmarshal(incoming.Payload, &payload); err != nil {
 			return ErrInvalidMessagePayload
@@ -78,6 +92,18 @@ func (s *ChatService) HandleIncomingEvent(ctx context.Context, authorID uuid.UUI
 
 		_, err := s.CreateMessage(ctx, authorID, payload.ChannelID, payload.Content)
 		return err
+	case "TYPING_START":
+		var payload IncomingTypingPayload
+		if err := json.Unmarshal(incoming.Payload, &payload); err != nil {
+			return ErrInvalidMessagePayload
+		}
+		return s.BroadcastTyping(ctx, authorID, payload.ChannelID)
+	case "PRESENCE_UPDATE":
+		var payload PresencePayload
+		if err := json.Unmarshal(incoming.Payload, &payload); err != nil {
+			return ErrInvalidMessagePayload
+		}
+		return s.UpdatePresence(ctx, authorID, payload.Status, 60*time.Second)
 	default:
 		return ErrUnsupportedEventType
 	}
@@ -104,13 +130,42 @@ func (s *ChatService) CreateMessage(
 
 	payload := toMessagePayload(*message)
 	if err := s.hub.Broadcast(Event{
-		Type:    "message_create",
+		Op:      0,
+		Event:   "MESSAGE_CREATE",
 		Payload: payload,
 	}); err != nil {
 		return nil, err
 	}
 
 	return &payload, nil
+}
+
+func (s *ChatService) BroadcastTyping(ctx context.Context, authorID uuid.UUID, channelID uint) error {
+	return s.hub.Broadcast(Event{
+		Op:    0,
+		Event: "TYPING_START",
+		Payload: map[string]interface{}{
+			"channel_id": channelID,
+			"user_id":    authorID.String(),
+		},
+	})
+}
+
+func (s *ChatService) UpdatePresence(ctx context.Context, authorID uuid.UUID, status string, ttl time.Duration) error {
+	if status == "" {
+		status = "online"
+	}
+	if err := s.hub.SetPresence(ctx, authorID.String(), status, ttl); err != nil {
+		return err
+	}
+	return s.hub.Broadcast(Event{
+		Op:    0,
+		Event: "PRESENCE_UPDATE",
+		Payload: PresencePayload{
+			UserID: authorID.String(),
+			Status: status,
+		},
+	})
 }
 
 func (s *ChatService) ListMessages(
@@ -135,6 +190,14 @@ func (s *ChatService) ListMessages(
 	}, nil
 }
 
+func (s *ChatService) GetRecentMessages(ctx context.Context, channelID uint) ([]domain.Message, error) {
+	messages, _, err := s.repo.ListByChannel(ctx, channelID, nil, 50)
+	if err != nil {
+		return nil, err
+	}
+	return messages, nil
+}
+
 func toMessagePayload(message domain.Message) MessagePayload {
 	return MessagePayload{
 		ID:        message.ID,
@@ -145,5 +208,14 @@ func toMessagePayload(message domain.Message) MessagePayload {
 			Username: message.User.Username,
 			Avatar:   "",
 		},
+		Attachments: attachmentsToURLs(message.Attachments),
 	}
+}
+
+func attachmentsToURLs(items []domain.Attachment) []string {
+	urls := make([]string, 0, len(items))
+	for _, item := range items {
+		urls = append(urls, item.URL)
+	}
+	return urls
 }

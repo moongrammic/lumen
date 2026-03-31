@@ -20,16 +20,14 @@
 
 ### ✅ Что уже реализовано (Backend Core)
 
-- [x] **Clean Architecture:** Четкое разделение на `cmd`, `internal` (domain, service, repository) и `pkg`.
-- [x] **Auth System:** JWT-авторизация с Claims (ID, Exp) и Middleware защитой доступа.
-- [x] **Scalable Real-time:** WebSocket Hub с синхронизацией через **Redis Pub/Sub** (горизонтальное масштабирование).
-- [x] **Database Engine:** PostgreSQL + GORM с поддержкой Soft Delete и автоматических миграций.
-- [x] **Chat Logic:**
-    - Создание гильдий (серверов) и вступление по уникальным инвайт-кодам.
-    - Текстовые каналы и персистентное хранение истории сообщений.
-    - **Cursor-based Pagination** для эффективной подгрузки истории (параметры `before`, `limit`).
-- [x] **Stability & DX:** Структурированное логирование (`slog`), валидация DTO (`validator/v10`) и типизированные API ошибки.
-- [x] **DevOps:** Готовый `docker-compose.yml` для локального запуска всей инфраструктуры.
+- [x] **Gateway Architecture:** WebSocket шлюз с поддержкой OpCodes (`MESSAGE_CREATE`, `TYPING_START`, `PRESENCE_UPDATE`).
+- [x] **Real-time Engine:** Синхронизация состояний через **Redis Pub/Sub** (Online/Offline статусы с TTL).
+- [x] **Domain Logic:**
+    - **Guilds & Channels:** Создание серверов, каналов и вступление по инвайтам.
+    - **Permissions:** Система прав на основе **Bitmask** (Permissions uint64).
+    - **Messages:** Персистентное хранение с поддержкой **Attachments**.
+- [x] **Voice Core:** Интеграция с **LiveKit SDK** для генерации Room Tokens.
+- [x] **Infrastructure:** Чистый конфиг (`cleanenv`), логирование (`slog`) и SQL-миграции.
 
 ---
 
