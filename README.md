@@ -1,6 +1,6 @@
 # 🌌 Lumen — Self-Hosted Discord Alternative
 
-![Lumen Banner](https://via.placeholder.com/1200x400/5865F2/FFFFFF?text=Lumen+—+High+Performance+Chat+Engine)
+![Lumen Banner](<img width="2000" height="2000" alt="lumen" src="https://github.com/user-attachments/assets/3521d5b9-956f-475d-893b-8ee9c68bd9e7" />)
 
 **Lumen** — это современная, высокопроизводительная платформа для общения с открытым исходным кодом. Полный контроль над данными, безопасность и скорость Go в сочетании с гибкостью Next.js 15.
 
