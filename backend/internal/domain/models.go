@@ -15,9 +15,17 @@ type User struct {
 
 type Guild struct {
 	gorm.Model
-	Name    string `gorm:"not null"`
-	OwnerID uuid.UUID
-	Owner   User
+	Name       string `gorm:"not null"`
+	InviteCode string `gorm:"uniqueIndex;not null"`
+	OwnerID    uuid.UUID
+	Owner      User
+}
+
+type GuildMember struct {
+	gorm.Model
+	GuildID uint      `gorm:"index;not null"`
+	UserID  uuid.UUID `gorm:"type:uuid;index;not null"`
+	Role    string    `gorm:"not null;default:member"`
 }
 
 type Channel struct {

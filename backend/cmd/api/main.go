@@ -1,13 +1,16 @@
 package main
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	"log"
 	"lumen/internal/middleware"
 	"lumen/internal/repository"
 	"lumen/internal/service"
 	"lumen/internal/ws"
 	"os"
+	"strconv"
 	"time"
 
 	"github.com/gofiber/contrib/websocket"
@@ -15,8 +18,6 @@ import (
 	"github.com/gofiber/fiber/v2/middleware/limiter"
 	"github.com/gofiber/fiber/v2/middleware/logger"
 	"github.com/gofiber/fiber/v2/middleware/recover"
-	"github.com/golang-jwt/jwt/v5"
-	"github.com/google/uuid"
 )
 
 func main() {
@@ -27,6 +28,9 @@ func main() {
 	}
 	userRepo := repository.NewUserRepository(db)
 	userService := service.NewUserService(userRepo)
+	guildRepo := repository.NewGuildRepository(db)
+	guildService := service.NewGuildService(guildRepo)
+	messageRepo := repository.NewMessageRepository(db)
 
 	app := fiber.New(fiber.Config{
 		AppName: "Lumen API v1.0",
@@ -43,6 +47,7 @@ func main() {
 	// 3. Роуты
 	api := app.Group("/api")
 	hub := ws.NewHub()
+	chatService := service.NewChatService(messageRepo, hub)
 	go hub.Run()
 
 	api.Get("/health", func(c *fiber.Ctx) error {
@@ -50,14 +55,14 @@ func main() {
 	})
 
 	api.Get("/me", middleware.JWTProtected(), func(c *fiber.Ctx) error {
-		userID, err := extractUserID(c)
+		userID, err := middleware.ExtractUserIDFromClaims(c.Locals("user"))
 		if err != nil {
 			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
 				"error": err.Error(),
 			})
 		}
 
-		me, err := userService.GetMe(c.Context(), userID)
+		me, err := userService.GetMe(c.UserContext(), userID)
 		if err != nil {
 			if errors.Is(err, service.ErrUserNotFound) {
 				return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
@@ -72,11 +77,125 @@ func main() {
 		return c.JSON(me)
 	})
 
-	app.Get("/ws", limiter.New(limiter.Config{
+	api.Post("/guilds", middleware.JWTProtected(), func(c *fiber.Ctx) error {
+		type createGuildRequest struct {
+			Name string `json:"name"`
+		}
+
+		var req createGuildRequest
+		if err := c.BodyParser(&req); err != nil {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid body"})
+		}
+
+		userID, err := middleware.ExtractUserIDFromClaims(c.Locals("user"))
+		if err != nil {
+			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": err.Error()})
+		}
+
+		guild, err := guildService.Create(c.UserContext(), req.Name, userID)
+		if err != nil {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
+		}
+		return c.Status(fiber.StatusCreated).JSON(guild)
+	})
+
+	api.Post("/guilds/join", middleware.JWTProtected(), func(c *fiber.Ctx) error {
+		type joinGuildRequest struct {
+			InviteCode string `json:"invite_code"`
+		}
+
+		var req joinGuildRequest
+		if err := c.BodyParser(&req); err != nil {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid body"})
+		}
+
+		userID, err := middleware.ExtractUserIDFromClaims(c.Locals("user"))
+		if err != nil {
+			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": err.Error()})
+		}
+
+		guild, err := guildService.JoinByInvite(c.UserContext(), req.InviteCode, userID)
+		if err != nil {
+			if errors.Is(err, service.ErrGuildNotFound) {
+				return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "guild not found"})
+			}
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
+		}
+		return c.JSON(guild)
+	})
+
+	api.Get("/guilds/:guildID/channels/:channelID/messages", middleware.JWTProtected(), middleware.GuildAccess(guildRepo), func(c *fiber.Ctx) error {
+		guildID, err := strconv.ParseUint(c.Params("guildID"), 10, 32)
+		if err != nil {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid guild id"})
+		}
+
+		channelID, err := strconv.ParseUint(c.Params("channelID"), 10, 32)
+		if err != nil {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid channel id"})
+		}
+
+		belongs, err := guildRepo.ChannelBelongsToGuild(c.UserContext(), uint(channelID), uint(guildID))
+		if err != nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to verify channel access"})
+		}
+		if !belongs {
+			return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "channel does not belong to guild"})
+		}
+
+		var beforeID *uint
+		if rawBefore := c.Query("before"); rawBefore != "" {
+			parsedBefore, parseErr := strconv.ParseUint(rawBefore, 10, 32)
+			if parseErr != nil {
+				return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid before cursor"})
+			}
+			cursor := uint(parsedBefore)
+			beforeID = &cursor
+		}
+
+		limit := 50
+		if rawLimit := c.Query("limit"); rawLimit != "" {
+			parsedLimit, parseErr := strconv.Atoi(rawLimit)
+			if parseErr != nil || parsedLimit <= 0 {
+				return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid limit"})
+			}
+			limit = parsedLimit
+		}
+
+		result, err := chatService.ListMessages(c.UserContext(), uint(channelID), beforeID, limit)
+		if err != nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to list messages"})
+		}
+
+		return c.JSON(result)
+	})
+
+	app.Get("/ws", middleware.JWTProtected(), limiter.New(limiter.Config{
 		Max:        30,
 		Expiration: 60 * time.Second,
 	}), websocket.New(func(c *websocket.Conn) {
-		hub.HandleConnection(c)
+		userID, err := middleware.ExtractUserIDFromClaims(c.Locals("user"))
+		if err != nil {
+			_ = c.WriteMessage(websocket.TextMessage, []byte(`{"type":"error","payload":{"message":"unauthorized"}}`))
+			return
+		}
+
+		hub.Register(c)
+		defer hub.Unregister(c)
+
+		for {
+			_, msg, readErr := c.ReadMessage()
+			if readErr != nil {
+				return
+			}
+
+			if processErr := chatService.HandleIncomingEvent(context.Background(), userID, msg); processErr != nil {
+				_ = c.WriteMessage(
+					websocket.TextMessage,
+					[]byte(fmt.Sprintf(`{"type":"error","payload":{"message":"%s"}}`, processErr.Error())),
+				)
+			}
+		}
 	}))
 
 	// 4. Запуск
@@ -85,29 +204,4 @@ func main() {
 		port = "8080"
 	}
 	log.Fatal(app.Listen(":" + port))
-}
-
-func extractUserID(c *fiber.Ctx) (uuid.UUID, error) {
-	claims, ok := c.Locals("user").(jwt.MapClaims)
-	if !ok {
-		return uuid.Nil, errors.New("invalid token claims")
-	}
-
-	candidates := []string{"sub", "user_id", "id"}
-	for _, key := range candidates {
-		rawValue, exists := claims[key]
-		if !exists {
-			continue
-		}
-		strValue, ok := rawValue.(string)
-		if !ok || strValue == "" {
-			continue
-		}
-		parsed, err := uuid.Parse(strValue)
-		if err == nil {
-			return parsed, nil
-		}
-	}
-
-	return uuid.Nil, errors.New("token missing user id")
 }

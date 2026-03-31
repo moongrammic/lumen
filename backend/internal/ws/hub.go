@@ -2,6 +2,8 @@ package ws
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"log"
 	"os"
 
@@ -15,6 +17,7 @@ type Hub struct {
 	register   chan *websocket.Conn
 	unregister chan *websocket.Conn
 	broadcast  chan []byte
+	incoming   chan []byte
 	redis      *redis.Client
 	channel    string
 }
@@ -36,6 +39,7 @@ func NewHub() *Hub {
 		register:   make(chan *websocket.Conn),
 		unregister: make(chan *websocket.Conn),
 		broadcast:  make(chan []byte),
+		incoming:   make(chan []byte),
 		redis:      redis.NewClient(&redis.Options{Addr: redisAddr}),
 		channel:    redisChannel,
 	}
@@ -58,6 +62,8 @@ func (h *Hub) Run() {
 				log.Printf("redis publish error: %v", err)
 				h.deliver(message)
 			}
+		case message := <-h.incoming:
+			h.deliver(message)
 		}
 	}
 }
@@ -69,7 +75,7 @@ func (h *Hub) consumeRedisMessages() {
 	}()
 
 	for msg := range pubsub.Channel() {
-		h.deliver([]byte(msg.Payload))
+		h.incoming <- []byte(msg.Payload)
 	}
 }
 
@@ -84,16 +90,27 @@ func (h *Hub) deliver(message []byte) {
 }
 
 func (h *Hub) HandleConnection(conn *websocket.Conn) {
-	h.register <- conn
-	defer func() {
-		h.unregister <- conn
-	}()
+	h.Register(conn)
+}
 
-	for {
-		_, msg, err := conn.ReadMessage()
-		if err != nil {
-			return
-		}
-		h.broadcast <- msg
+func (h *Hub) Register(conn *websocket.Conn) {
+	h.register <- conn
+}
+
+func (h *Hub) Unregister(conn *websocket.Conn) {
+	h.unregister <- conn
+}
+
+func (h *Hub) Broadcast(event any) error {
+	data, err := json.Marshal(event)
+	if err != nil {
+		return err
+	}
+
+	select {
+	case h.broadcast <- data:
+		return nil
+	default:
+		return errors.New("hub broadcast queue is full")
 	}
 }
