@@ -2,6 +2,7 @@ package middleware
 
 import (
 	"context"
+	"lumen/pkg/apierr"
 	"strconv"
 
 	"github.com/gofiber/fiber/v2"
@@ -16,28 +17,20 @@ func GuildAccess(checker GuildAccessChecker) fiber.Handler {
 	return func(c *fiber.Ctx) error {
 		guildID64, err := strconv.ParseUint(c.Params("guildID"), 10, 32)
 		if err != nil {
-			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-				"error": "invalid guild id",
-			})
+			return apierr.Write(c, fiber.StatusBadRequest, "invalid_guild_id", "Guild ID has invalid format")
 		}
 
 		userID, err := ExtractUserIDFromClaims(c.Locals("user"))
 		if err != nil {
-			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
-				"error": err.Error(),
-			})
+			return apierr.Write(c, fiber.StatusUnauthorized, "invalid_token_claims", err.Error())
 		}
 
 		ok, err := checker.IsMember(c.UserContext(), uint(guildID64), userID)
 		if err != nil {
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-				"error": "failed to check guild access",
-			})
+			return apierr.Write(c, fiber.StatusInternalServerError, "guild_access_check_failed", "Failed to verify guild membership")
 		}
 		if !ok {
-			return c.Status(fiber.StatusForbidden).JSON(fiber.Map{
-				"error": "access denied",
-			})
+			return apierr.Write(c, fiber.StatusForbidden, "guild_access_denied", "You are not a member of this guild")
 		}
 
 		return c.Next()

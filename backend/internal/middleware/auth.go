@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"lumen/pkg/apierr"
 	"os"
 	"strings"
 
@@ -13,23 +14,17 @@ func JWTProtected() fiber.Handler {
 
 	return func(c *fiber.Ctx) error {
 		if secret == "" {
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-				"error": "JWT secret is not configured",
-			})
+			return apierr.Write(c, fiber.StatusInternalServerError, "jwt_not_configured", "JWT secret is not configured")
 		}
 
 		authHeader := c.Get("Authorization")
 		if authHeader == "" {
-			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
-				"error": "missing authorization header",
-			})
+			return apierr.Write(c, fiber.StatusUnauthorized, "missing_auth_header", "Missing Authorization header")
 		}
 
 		tokenString := strings.TrimSpace(strings.TrimPrefix(authHeader, "Bearer "))
 		if tokenString == "" || tokenString == authHeader {
-			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
-				"error": "invalid bearer token format",
-			})
+			return apierr.Write(c, fiber.StatusUnauthorized, "invalid_bearer_format", "Invalid Bearer token format")
 		}
 
 		token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
@@ -39,9 +34,7 @@ func JWTProtected() fiber.Handler {
 			return []byte(secret), nil
 		})
 		if err != nil || !token.Valid {
-			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
-				"error": "invalid or expired token",
-			})
+			return apierr.Write(c, fiber.StatusUnauthorized, "invalid_token", "Invalid or expired token")
 		}
 
 		if claims, ok := token.Claims.(jwt.MapClaims); ok {

@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"log"
+	"log/slog"
 	"os"
 
 	"github.com/gofiber/contrib/websocket"
@@ -59,7 +59,7 @@ func (h *Hub) Run() {
 			}
 		case message := <-h.broadcast:
 			if err := h.redis.Publish(h.ctx, h.channel, message).Err(); err != nil {
-				log.Printf("redis publish error: %v", err)
+				slog.Error("redis publish failed", "channel", h.channel, "error", err)
 				h.deliver(message)
 			}
 		case message := <-h.incoming:
@@ -82,7 +82,7 @@ func (h *Hub) consumeRedisMessages() {
 func (h *Hub) deliver(message []byte) {
 	for conn := range h.clients {
 		if err := conn.WriteMessage(websocket.TextMessage, message); err != nil {
-			log.Printf("ws write error: %v", err)
+			slog.Error("ws write failed", "error", err)
 			delete(h.clients, conn)
 			_ = conn.Close()
 		}

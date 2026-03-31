@@ -4,15 +4,17 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"lumen/internal/middleware"
 	"lumen/internal/repository"
 	"lumen/internal/service"
 	"lumen/internal/ws"
+	"lumen/pkg/apierr"
 	"os"
 	"strconv"
 	"time"
 
+	"github.com/go-playground/validator/v10"
 	"github.com/gofiber/contrib/websocket"
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/fiber/v2/middleware/limiter"
@@ -21,10 +23,13 @@ import (
 )
 
 func main() {
+	validate := validator.New()
+
 	// 1. Инициализация БД
 	db, err := repository.InitDB()
 	if err != nil {
-		log.Fatalf("Failed to connect to database: %v", err)
+		slog.Error("failed to connect to database", "error", err)
+		os.Exit(1)
 	}
 	userRepo := repository.NewUserRepository(db)
 	userService := service.NewUserService(userRepo)
@@ -57,69 +62,61 @@ func main() {
 	api.Get("/me", middleware.JWTProtected(), func(c *fiber.Ctx) error {
 		userID, err := middleware.ExtractUserIDFromClaims(c.Locals("user"))
 		if err != nil {
-			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
-				"error": err.Error(),
-			})
+			return apierr.Write(c, fiber.StatusUnauthorized, "invalid_token_claims", err.Error())
 		}
 
 		me, err := userService.GetMe(c.UserContext(), userID)
 		if err != nil {
 			if errors.Is(err, service.ErrUserNotFound) {
-				return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
-					"error": "user not found",
-				})
+				return apierr.Write(c, fiber.StatusNotFound, "user_not_found", "Пользователь не найден")
 			}
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-				"error": "failed to load user",
-			})
+			return apierr.Write(c, fiber.StatusInternalServerError, "user_load_failed", "Не удалось получить профиль пользователя")
 		}
 
 		return c.JSON(me)
 	})
 
 	api.Post("/guilds", middleware.JWTProtected(), func(c *fiber.Ctx) error {
-		type createGuildRequest struct {
-			Name string `json:"name"`
-		}
-
-		var req createGuildRequest
+		var req CreateGuildDTO
 		if err := c.BodyParser(&req); err != nil {
-			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid body"})
+			return apierr.Write(c, fiber.StatusBadRequest, "invalid_body", "Некорректный JSON запроса")
+		}
+		if err := validate.Struct(req); err != nil {
+			return apierr.Write(c, fiber.StatusBadRequest, "validation_failed", err.Error())
 		}
 
 		userID, err := middleware.ExtractUserIDFromClaims(c.Locals("user"))
 		if err != nil {
-			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": err.Error()})
+			return apierr.Write(c, fiber.StatusUnauthorized, "invalid_token_claims", err.Error())
 		}
 
 		guild, err := guildService.Create(c.UserContext(), req.Name, userID)
 		if err != nil {
-			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
+			return apierr.Write(c, fiber.StatusBadRequest, "guild_create_failed", err.Error())
 		}
 		return c.Status(fiber.StatusCreated).JSON(guild)
 	})
 
 	api.Post("/guilds/join", middleware.JWTProtected(), func(c *fiber.Ctx) error {
-		type joinGuildRequest struct {
-			InviteCode string `json:"invite_code"`
-		}
-
-		var req joinGuildRequest
+		var req JoinGuildDTO
 		if err := c.BodyParser(&req); err != nil {
-			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid body"})
+			return apierr.Write(c, fiber.StatusBadRequest, "invalid_body", "Некорректный JSON запроса")
+		}
+		if err := validate.Struct(req); err != nil {
+			return apierr.Write(c, fiber.StatusBadRequest, "validation_failed", err.Error())
 		}
 
 		userID, err := middleware.ExtractUserIDFromClaims(c.Locals("user"))
 		if err != nil {
-			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": err.Error()})
+			return apierr.Write(c, fiber.StatusUnauthorized, "invalid_token_claims", err.Error())
 		}
 
 		guild, err := guildService.JoinByInvite(c.UserContext(), req.InviteCode, userID)
 		if err != nil {
 			if errors.Is(err, service.ErrGuildNotFound) {
-				return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "guild not found"})
+				return apierr.Write(c, fiber.StatusNotFound, "guild_not_found", "Гильдия с таким invite code не существует")
 			}
-			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
+			return apierr.Write(c, fiber.StatusBadRequest, "guild_join_failed", err.Error())
 		}
 		return c.JSON(guild)
 	})
@@ -127,27 +124,27 @@ func main() {
 	api.Get("/guilds/:guildID/channels/:channelID/messages", middleware.JWTProtected(), middleware.GuildAccess(guildRepo), func(c *fiber.Ctx) error {
 		guildID, err := strconv.ParseUint(c.Params("guildID"), 10, 32)
 		if err != nil {
-			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid guild id"})
+			return apierr.Write(c, fiber.StatusBadRequest, "invalid_guild_id", "Guild ID has invalid format")
 		}
 
 		channelID, err := strconv.ParseUint(c.Params("channelID"), 10, 32)
 		if err != nil {
-			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid channel id"})
+			return apierr.Write(c, fiber.StatusBadRequest, "invalid_channel_id", "Channel ID has invalid format")
 		}
 
 		belongs, err := guildRepo.ChannelBelongsToGuild(c.UserContext(), uint(channelID), uint(guildID))
 		if err != nil {
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to verify channel access"})
+			return apierr.Write(c, fiber.StatusInternalServerError, "channel_access_check_failed", "Не удалось проверить принадлежность канала")
 		}
 		if !belongs {
-			return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "channel does not belong to guild"})
+			return apierr.Write(c, fiber.StatusForbidden, "channel_not_in_guild", "Канал не принадлежит указанной гильдии")
 		}
 
 		var beforeID *uint
 		if rawBefore := c.Query("before"); rawBefore != "" {
 			parsedBefore, parseErr := strconv.ParseUint(rawBefore, 10, 32)
 			if parseErr != nil {
-				return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid before cursor"})
+				return apierr.Write(c, fiber.StatusBadRequest, "invalid_before_cursor", "Параметр before имеет неверный формат")
 			}
 			cursor := uint(parsedBefore)
 			beforeID = &cursor
@@ -157,14 +154,14 @@ func main() {
 		if rawLimit := c.Query("limit"); rawLimit != "" {
 			parsedLimit, parseErr := strconv.Atoi(rawLimit)
 			if parseErr != nil || parsedLimit <= 0 {
-				return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid limit"})
+				return apierr.Write(c, fiber.StatusBadRequest, "invalid_limit", "Параметр limit должен быть положительным числом")
 			}
 			limit = parsedLimit
 		}
 
 		result, err := chatService.ListMessages(c.UserContext(), uint(channelID), beforeID, limit)
 		if err != nil {
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to list messages"})
+			return apierr.Write(c, fiber.StatusInternalServerError, "messages_list_failed", "Не удалось получить историю сообщений")
 		}
 
 		return c.JSON(result)
@@ -203,5 +200,16 @@ func main() {
 	if port == "" {
 		port = "8080"
 	}
-	log.Fatal(app.Listen(":" + port))
+	if err := app.Listen(":" + port); err != nil {
+		slog.Error("fiber listen failed", "port", port, "error", err)
+		os.Exit(1)
+	}
+}
+
+type CreateGuildDTO struct {
+	Name string `json:"name" validate:"required,min=3,max=32"`
+}
+
+type JoinGuildDTO struct {
+	InviteCode string `json:"invite_code" validate:"required,min=6,max=64"`
 }
