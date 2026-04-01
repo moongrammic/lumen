@@ -15,6 +15,12 @@ func JWTProtected(secret string) fiber.Handler {
 		}
 
 		authHeader := c.Get("Authorization")
+		// Browser WebSocket API cannot set custom headers; allow token via query on upgrade.
+		if authHeader == "" {
+			if q := strings.TrimSpace(c.Query("token")); q != "" {
+				authHeader = "Bearer " + q
+			}
+		}
 		if authHeader == "" {
 			return apierr.Write(c, fiber.StatusUnauthorized, "missing_auth_header", "Missing Authorization header")
 		}
