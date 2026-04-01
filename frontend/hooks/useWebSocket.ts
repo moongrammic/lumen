@@ -39,7 +39,9 @@ export function useWebSocket() {
 
     const resubscribe = () => client.subscribeToChannel(channelId);
     const offConnect = client.onConnect(resubscribe);
-    resubscribe();
+    if (client.isSessionReady()) {
+      resubscribe();
+    }
 
     return () => {
       offConnect();

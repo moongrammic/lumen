@@ -5,7 +5,6 @@ import (
 	"strings"
 
 	"github.com/gofiber/fiber/v2"
-	"github.com/golang-jwt/jwt/v5"
 )
 
 func JWTProtected(secret string) fiber.Handler {
@@ -15,12 +14,6 @@ func JWTProtected(secret string) fiber.Handler {
 		}
 
 		authHeader := c.Get("Authorization")
-		// Browser WebSocket API cannot set custom headers; allow token via query on upgrade.
-		if authHeader == "" {
-			if q := strings.TrimSpace(c.Query("token")); q != "" {
-				authHeader = "Bearer " + q
-			}
-		}
 		if authHeader == "" {
 			return apierr.Write(c, fiber.StatusUnauthorized, "missing_auth_header", "Missing Authorization header")
 		}
@@ -30,20 +23,11 @@ func JWTProtected(secret string) fiber.Handler {
 			return apierr.Write(c, fiber.StatusUnauthorized, "invalid_bearer_format", "Invalid Bearer token format")
 		}
 
-		token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
-			if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
-				return nil, fiber.NewError(fiber.StatusUnauthorized, "unexpected signing method")
-			}
-			return []byte(secret), nil
-		})
-		if err != nil || !token.Valid {
-			return apierr.Write(c, fiber.StatusUnauthorized, "invalid_token", "Invalid or expired token")
+		claims, err := ParseJWTFromString(secret, tokenString)
+		if err != nil {
+			return apierr.Write(c, fiber.StatusUnauthorized, "invalid_token", err.Error())
 		}
-
-		if claims, ok := token.Claims.(jwt.MapClaims); ok {
-			c.Locals("user", claims)
-		}
-
+		c.Locals("user", claims)
 		return c.Next()
 	}
 }

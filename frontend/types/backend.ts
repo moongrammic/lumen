@@ -35,6 +35,11 @@ export type WsClientChannelPayload = {
   channel_id: number;
 };
 
+/** Первое сообщение после onopen: аутентификация без токена в URL */
+export type WsClientIdentifyPayload = {
+  token: string;
+};
+
 // --- Server → client (broadcast из chat.go)
 
 export type WsAuthorDTO = {
@@ -77,7 +82,10 @@ export type WsErrorPayload = {
 };
 
 /** Унифицированный ответ с полем event (основной формат) */
+export type WsReadyPayload = Record<string, never>;
+
 export type WsServerEnvelope =
+  | { op: number; event: "READY"; payload: WsReadyPayload }
   | { op: number; event: "MESSAGE_CREATE"; payload: WsMessagePayload }
   | { op: number; event: "TYPING_START"; payload: WsTypingStartPayload }
   | { op: number; event: "PRESENCE_UPDATE"; payload: WsPresenceUpdatePayload }

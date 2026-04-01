@@ -91,6 +91,17 @@ function Wait-ForEvent {
     return $null
 }
 
+function Send-Identify {
+    param(
+        [System.Net.WebSockets.ClientWebSocket]$Ws,
+        [string]$Jwt,
+        [int]$TimeoutSeconds
+    )
+    Send-WSJson -Ws $Ws -Payload @{ op = 2; event = "IDENTIFY"; payload = @{ token = $Jwt } }
+    $ready = Wait-ForEvent -Ws $Ws -EventName "READY" -TimeoutSeconds $TimeoutSeconds
+    if ($null -eq $ready) { throw "Did not receive READY after IDENTIFY" }
+}
+
 Write-Host "=== WS E2E: register/login ===" -ForegroundColor Cyan
 $seed = Get-Random
 $registerBody = @{
@@ -119,6 +130,10 @@ try {
     $a = Connect-WebSocket -Url $WsUrl -Jwt $jwt
     $b = Connect-WebSocket -Url $WsUrl -Jwt $jwt
     $c = Connect-WebSocket -Url $WsUrl -Jwt $jwt
+
+    Send-Identify -Ws $a -Jwt $jwt -TimeoutSeconds $TimeoutSeconds
+    Send-Identify -Ws $b -Jwt $jwt -TimeoutSeconds $TimeoutSeconds
+    Send-Identify -Ws $c -Jwt $jwt -TimeoutSeconds $TimeoutSeconds
 
     Send-WSJson -Ws $a -Payload @{ op = 10; event = "SUBSCRIBE_CHANNEL"; payload = @{ channel_id = $channelId } }
     Send-WSJson -Ws $b -Payload @{ op = 10; event = "SUBSCRIBE_CHANNEL"; payload = @{ channel_id = $channelId } }

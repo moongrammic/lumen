@@ -14,9 +14,11 @@ import (
 	"lumen/pkg/apierr"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/go-playground/validator/v10"
+	"github.com/google/uuid"
 	"github.com/gofiber/contrib/websocket"
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/fiber/v2/middleware/limiter"
@@ -412,13 +414,20 @@ func main() {
 		return c.JSON(fiber.Map{"ok": true})
 	})
 
-	app.Get("/ws", middleware.JWTProtected(cfg.JWT.Secret), limiter.New(limiter.Config{
+	app.Get("/ws", limiter.New(limiter.Config{
 		Max:        30,
 		Expiration: 60 * time.Second,
 	}), websocket.New(func(c *websocket.Conn) {
-		userID, err := middleware.ExtractUserIDFromClaims(c.Locals("user"))
+		userID, err := waitWebSocketIdentify(c, cfg.JWT.Secret, 15*time.Second)
 		if err != nil {
-			_ = c.WriteMessage(websocket.TextMessage, []byte(`{"type":"error","payload":{"message":"unauthorized"}}`))
+			_ = c.WriteJSON(fiber.Map{
+				"op":      0,
+				"event":   "ERROR",
+				"payload": fiber.Map{"code": "IDENTIFY_FAILED", "message": err.Error()},
+			})
+			return
+		}
+		if err := c.WriteJSON(fiber.Map{"op": 0, "event": "READY", "payload": fiber.Map{}}); err != nil {
 			return
 		}
 
@@ -442,6 +451,13 @@ func main() {
 			}
 
 			switch incoming.Event {
+			case "IDENTIFY":
+				_ = c.WriteJSON(fiber.Map{
+					"op":      0,
+					"event":   "ERROR",
+					"payload": fiber.Map{"code": "ALREADY_IDENTIFIED", "message": "session already authenticated"},
+				})
+				continue
 			case "SUBSCRIBE_CHANNEL":
 				channelID, err := extractChannelID(incoming.Payload)
 				if err != nil {
@@ -551,6 +567,39 @@ type VoiceJoinTokenDTO struct {
 type VoiceLeaveDTO struct {
 	GuildID  uint   `json:"guild_id" validate:"required"`
 	RoomName string `json:"room_name" validate:"required,min=2,max=128"`
+}
+
+func waitWebSocketIdentify(c *websocket.Conn, secret string, timeout time.Duration) (uuid.UUID, error) {
+	if err := c.SetReadDeadline(time.Now().Add(timeout)); err != nil {
+		return uuid.Nil, err
+	}
+	defer func() { _ = c.SetReadDeadline(time.Time{}) }()
+
+	_, msg, err := c.ReadMessage()
+	if err != nil {
+		return uuid.Nil, err
+	}
+
+	var incoming service.IncomingEvent
+	if err := json.Unmarshal(msg, &incoming); err != nil {
+		return uuid.Nil, errors.New("invalid websocket payload")
+	}
+	if incoming.Event != "IDENTIFY" {
+		return uuid.Nil, fmt.Errorf("expected IDENTIFY first, got %q", incoming.Event)
+	}
+
+	var identify struct {
+		Token string `json:"token"`
+	}
+	if err := json.Unmarshal(incoming.Payload, &identify); err != nil || strings.TrimSpace(identify.Token) == "" {
+		return uuid.Nil, errors.New("missing token in IDENTIFY payload")
+	}
+
+	claims, err := middleware.ParseJWTFromString(secret, identify.Token)
+	if err != nil {
+		return uuid.Nil, err
+	}
+	return middleware.ExtractUserIDFromClaims(claims)
 }
 
 func extractChannelID(raw json.RawMessage) (uint, error) {

@@ -9,8 +9,8 @@ import { useChatStore } from "@/store/useChatStore";
 import { toast } from "sonner";
 
 /**
- * Подключение только к NEXT_PUBLIC_WS_URL (прямой URL к backend).
- * Rewrites Next.js для /ws оставьте для dev/особых случаев — upgrade через прокси бывает нестабилен.
+ * WebSocket только на NEXT_PUBLIC_WS_URL. Аутентификация: первое сообщение IDENTIFY (op 2) с JWT в теле,
+ * затем сервер шлёт READY — без токена в query string.
  */
 class SocketClient {
   private ws: WebSocket | null = null;
@@ -18,6 +18,7 @@ class SocketClient {
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private readonly wsUrl = process.env.NEXT_PUBLIC_WS_URL ?? "ws://localhost:8080/ws";
   private manualClose = false;
+  private identified = false;
   private readonly connectListeners = new Set<() => void>();
   private readonly outboundQueue: string[] = [];
 
@@ -26,19 +27,23 @@ class SocketClient {
     return () => this.connectListeners.delete(listener);
   }
 
+  /** Сессия готова к SUBSCRIBE / MESSAGE_CREATE (получен READY). */
+  isSessionReady(): boolean {
+    return this.identified && this.ws?.readyState === WebSocket.OPEN;
+  }
+
   connect() {
     if (typeof window === "undefined" || this.ws?.readyState === WebSocket.OPEN) return;
 
     this.manualClose = false;
+    this.identified = false;
 
     const token = useAuthStore.getState().token;
     if (!token) {
       return;
     }
 
-    const url = new URL(this.wsUrl);
-    url.searchParams.set("token", token);
-    this.ws = new WebSocket(url.toString());
+    this.ws = new WebSocket(this.wsUrl);
 
     this.ws.onerror = () => {
       this.ws?.close();
@@ -46,8 +51,15 @@ class SocketClient {
 
     this.ws.onopen = () => {
       this.reconnectAttempts = 0;
-      this.flushOutbound();
-      this.connectListeners.forEach((fn) => fn());
+      const t = useAuthStore.getState().token;
+      if (!t || !this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+      this.ws.send(
+        JSON.stringify({
+          op: 2,
+          event: "IDENTIFY",
+          payload: { token: t },
+        }),
+      );
     };
 
     this.ws.onmessage = (event) => {
@@ -55,6 +67,7 @@ class SocketClient {
     };
 
     this.ws.onclose = () => {
+      this.identified = false;
       if (!this.manualClose) {
         this.scheduleReconnect();
       }
@@ -63,6 +76,7 @@ class SocketClient {
 
   disconnect() {
     this.manualClose = true;
+    this.identified = false;
     this.outboundQueue.length = 0;
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
     this.reconnectTimer = null;
@@ -70,7 +84,6 @@ class SocketClient {
     this.ws = null;
   }
 
-  /** main.go: SUBSCRIBE_CHANNEL + service.IncomingEvent */
   subscribeToChannel(channelId: number) {
     this.sendFrame({
       op: 0,
@@ -87,7 +100,6 @@ class SocketClient {
     });
   }
 
-  /** chat.go: MESSAGE_CREATE */
   sendMessage(channelId: number, content: string) {
     this.sendFrame({
       op: 0,
@@ -104,18 +116,18 @@ class SocketClient {
 
   private sendFrame(frame: { op: number; event: string; payload: object }) {
     const raw = JSON.stringify(frame);
-    if (this.ws?.readyState === WebSocket.OPEN) {
+    if (this.ws?.readyState === WebSocket.OPEN && this.identified) {
       this.ws.send(raw);
       return;
     }
-    if (this.ws?.readyState === WebSocket.CONNECTING) {
+    if (this.ws?.readyState === WebSocket.CONNECTING || (this.ws?.readyState === WebSocket.OPEN && !this.identified)) {
       this.outboundQueue.push(raw);
       return;
     }
   }
 
   private flushOutbound() {
-    if (this.ws?.readyState !== WebSocket.OPEN) return;
+    if (this.ws?.readyState !== WebSocket.OPEN || !this.identified) return;
     while (this.outboundQueue.length > 0) {
       const raw = this.outboundQueue.shift();
       if (raw) this.ws.send(raw);
@@ -149,6 +161,11 @@ class SocketClient {
 
   private handleServerEnvelope(msg: WsServerEnvelope) {
     switch (msg.event) {
+      case "READY":
+        this.identified = true;
+        this.flushOutbound();
+        this.connectListeners.forEach((fn) => fn());
+        break;
       case "MESSAGE_CREATE":
         useChatStore.getState().upsertMessage(msg.payload);
         break;
@@ -156,7 +173,6 @@ class SocketClient {
         useChatStore.getState().setTypingUser(msg.payload.channel_id, msg.payload.user_id);
         break;
       case "PRESENCE_UPDATE":
-        // при необходимости — отдельный store presence
         break;
       case "CHANNEL_SUBSCRIBED":
         break;
@@ -164,6 +180,15 @@ class SocketClient {
         break;
       case "ERROR": {
         const p = msg.payload;
+        if (p.code === "IDENTIFY_FAILED") {
+          toast.error(p.message ?? "Identify failed");
+          this.disconnect();
+          void useAuthStore.getState().logout();
+          if (typeof window !== "undefined") {
+            window.location.assign("/login");
+          }
+          return;
+        }
         const text =
           p.message ??
           (p.code ? `${p.code}${p.retry_after != null ? ` (retry ${p.retry_after}s)` : ""}` : "Unknown error");

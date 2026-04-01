@@ -230,7 +230,7 @@ func (s *ChatService) ListMessages(
 	}, nil
 }
 
-func (s *ChatService) GetRecentMessages(ctx context.Context, userID uuid.UUID, channelID uint) ([]domain.Message, error) {
+func (s *ChatService) GetRecentMessages(ctx context.Context, userID uuid.UUID, channelID uint) ([]MessagePayload, error) {
 	if err := s.ensureCanReadChannel(ctx, userID, channelID); err != nil {
 		return nil, err
 	}
@@ -239,7 +239,11 @@ func (s *ChatService) GetRecentMessages(ctx context.Context, userID uuid.UUID, c
 	if err != nil {
 		return nil, err
 	}
-	return messages, nil
+	out := make([]MessagePayload, 0, len(messages))
+	for i := len(messages) - 1; i >= 0; i-- {
+		out = append(out, toMessagePayload(messages[i]))
+	}
+	return out, nil
 }
 
 func (s *ChatService) ensureCanReadChannel(ctx context.Context, userID uuid.UUID, channelID uint) error {
