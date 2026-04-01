@@ -7,6 +7,7 @@ import (
 
 const (
 	PermSendMessages uint64 = 1 << iota
+	PermViewChannel
 	PermManageChannels
 	PermManageGuild
 )
@@ -33,6 +34,13 @@ type GuildMember struct {
 	UserID      uuid.UUID `gorm:"type:uuid;index;not null"`
 	Role        string    `gorm:"not null;default:member"`
 	Permissions uint64    `gorm:"not null;default:1"`
+}
+
+func (m *GuildMember) HasPermission(perm uint64) bool {
+	if m == nil {
+		return false
+	}
+	return (m.Permissions & perm) == perm
 }
 
 type Channel struct {

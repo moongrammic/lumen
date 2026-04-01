@@ -28,9 +28,10 @@ type ChatAccessChecker interface {
 }
 
 type ChatService struct {
-	repo   ChatRepository
-	access ChatAccessChecker
-	hub    ChatBroadcaster
+	repo        ChatRepository
+	access      ChatAccessChecker
+	hub         ChatBroadcaster
+	rateLimiter MessageRateLimiter
 }
 
 type AuthorDTO struct {
@@ -81,11 +82,22 @@ type ListMessagesResult struct {
 var ErrUnsupportedEventType = errors.New("unsupported event type")
 var ErrInvalidMessagePayload = errors.New("invalid message payload")
 var ErrChatAccessDenied = errors.New("chat access denied")
-var ErrMissingSendPermission = errors.New("missing send messages permission")
+var ErrInsufficientPermissions = errors.New("insufficient permissions")
 var ErrChannelNotFound = errors.New("channel not found")
+var ErrRateLimitExceeded = errors.New("rate limit exceeded")
 
-func NewChatService(repo ChatRepository, access ChatAccessChecker, hub ChatBroadcaster) *ChatService {
-	return &ChatService{repo: repo, access: access, hub: hub}
+func NewChatService(
+	repo ChatRepository,
+	access ChatAccessChecker,
+	hub ChatBroadcaster,
+	rateLimiter MessageRateLimiter,
+) *ChatService {
+	return &ChatService{
+		repo:        repo,
+		access:      access,
+		hub:         hub,
+		rateLimiter: rateLimiter,
+	}
 }
 
 func (s *ChatService) HandleIncomingEvent(ctx context.Context, authorID uuid.UUID, raw []byte) error {
@@ -131,6 +143,15 @@ func (s *ChatService) CreateMessage(
 	}
 	if err := s.ensureCanSendMessage(ctx, authorID, channelID); err != nil {
 		return nil, err
+	}
+	if s.rateLimiter != nil {
+		allowed, err := s.rateLimiter.AllowMessage(ctx, authorID.String(), channelID)
+		if err != nil {
+			return nil, err
+		}
+		if !allowed {
+			return nil, ErrRateLimitExceeded
+		}
 	}
 
 	message, err := s.repo.Create(ctx, &domain.Message{
@@ -259,8 +280,9 @@ func (s *ChatService) ensureCanSendMessage(ctx context.Context, userID uuid.UUID
 	if err != nil {
 		return err
 	}
-	if perms&domain.PermSendMessages == 0 {
-		return ErrMissingSendPermission
+	member := domain.GuildMember{Permissions: perms}
+	if !member.HasPermission(domain.PermSendMessages) {
+		return ErrInsufficientPermissions
 	}
 	return nil
 }

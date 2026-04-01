@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -21,6 +22,7 @@ import (
 	"github.com/gofiber/fiber/v2/middleware/limiter"
 	"github.com/gofiber/fiber/v2/middleware/logger"
 	"github.com/gofiber/fiber/v2/middleware/recover"
+	"github.com/redis/go-redis/v9"
 )
 
 func main() {
@@ -64,7 +66,13 @@ func main() {
 	// 3. Роуты
 	api := app.Group("/api")
 	hub := ws.NewHub(cfg.Redis)
-	chatService := service.NewChatService(messageRepo, guildRepo, hub)
+	rateLimiterRedis := redis.NewClient(&redis.Options{
+		Addr:     cfg.Redis.Addr,
+		Password: cfg.Redis.Password,
+		DB:       cfg.Redis.DB,
+	})
+	messageRateLimiter := service.NewRedisMessageRateLimiter(rateLimiterRedis, cfg.RateLimit)
+	chatService := service.NewChatService(messageRepo, guildRepo, hub, messageRateLimiter)
 	channelService := service.NewChannelService(channelRepo, guildRepo)
 	voiceService := service.NewVoiceService(guildRepo, hub, cfg.LiveKit.APIKey, cfg.LiveKit.APISecret)
 	go hub.Run()
@@ -315,8 +323,12 @@ func main() {
 			if errors.Is(err, service.ErrChatAccessDenied) {
 				return apierr.Write(c, fiber.StatusForbidden, "chat_access_denied", "Нет доступа к каналу")
 			}
-			if errors.Is(err, service.ErrMissingSendPermission) {
-				return apierr.Write(c, fiber.StatusForbidden, "missing_send_permission", "Недостаточно прав для отправки сообщений")
+			if errors.Is(err, service.ErrInsufficientPermissions) {
+				return apierr.Write(c, fiber.StatusForbidden, "insufficient_permissions", "Недостаточно прав для отправки сообщений")
+			}
+			if errors.Is(err, service.ErrRateLimitExceeded) {
+				c.Set("Retry-After", "10")
+				return apierr.Write(c, fiber.StatusTooManyRequests, "rate_limit_exceeded", "Слишком много сообщений, попробуйте позже")
 			}
 			if errors.Is(err, service.ErrChannelNotFound) {
 				return apierr.Write(c, fiber.StatusNotFound, "channel_not_found", "Канал не найден")
@@ -423,7 +435,71 @@ func main() {
 				return
 			}
 
+			var incoming service.IncomingEvent
+			if err := json.Unmarshal(msg, &incoming); err != nil {
+				_ = c.WriteMessage(websocket.TextMessage, []byte(`{"event":"ERROR","payload":{"message":"invalid websocket payload"}}`))
+				continue
+			}
+
+			switch incoming.Event {
+			case "SUBSCRIBE_CHANNEL":
+				channelID, err := extractChannelID(incoming.Payload)
+				if err != nil {
+					_ = c.WriteMessage(websocket.TextMessage, []byte(`{"event":"ERROR","payload":{"message":"invalid channel_id"}}`))
+					continue
+				}
+				guildID, err := guildRepo.GetChannelGuildID(context.Background(), channelID)
+				if err != nil {
+					_ = c.WriteMessage(websocket.TextMessage, []byte(`{"event":"ERROR","payload":{"message":"channel not found"}}`))
+					continue
+				}
+				isMember, err := guildRepo.IsMember(context.Background(), guildID, userID)
+				if err != nil || !isMember {
+					_ = c.WriteMessage(websocket.TextMessage, []byte(`{"event":"ERROR","payload":{"message":"access denied"}}`))
+					continue
+				}
+				if err := hub.Subscribe(c, channelID); err != nil {
+					_ = c.WriteMessage(websocket.TextMessage, []byte(`{"event":"ERROR","payload":{"message":"subscribe failed"}}`))
+					continue
+				}
+				_ = c.WriteJSON(fiber.Map{"event": "CHANNEL_SUBSCRIBED", "payload": fiber.Map{"channel_id": channelID}})
+				continue
+			case "UNSUBSCRIBE_CHANNEL":
+				channelID, err := extractChannelID(incoming.Payload)
+				if err != nil {
+					_ = c.WriteMessage(websocket.TextMessage, []byte(`{"event":"ERROR","payload":{"message":"invalid channel_id"}}`))
+					continue
+				}
+				if err := hub.Unsubscribe(c, channelID); err != nil {
+					_ = c.WriteMessage(websocket.TextMessage, []byte(`{"event":"ERROR","payload":{"message":"unsubscribe failed"}}`))
+					continue
+				}
+				_ = c.WriteJSON(fiber.Map{"event": "CHANNEL_UNSUBSCRIBED", "payload": fiber.Map{"channel_id": channelID}})
+				continue
+			}
+
 			if processErr := chatService.HandleIncomingEvent(context.Background(), userID, msg); processErr != nil {
+				if errors.Is(processErr, service.ErrInsufficientPermissions) {
+					_ = c.WriteJSON(fiber.Map{
+						"event": "ERROR",
+						"payload": fiber.Map{
+							"code":    "INSUFFICIENT_PERMISSIONS",
+							"message": "You don't have permission to send messages in this channel",
+						},
+					})
+					continue
+				}
+				if errors.Is(processErr, service.ErrRateLimitExceeded) {
+					_ = c.WriteJSON(fiber.Map{
+						"event": "ERROR",
+						"payload": fiber.Map{
+							"code":        "RATE_LIMIT_EXCEEDED",
+							"message":     "Too many messages, slow down",
+							"retry_after": 10,
+						},
+					})
+					continue
+				}
 				_ = c.WriteMessage(
 					websocket.TextMessage,
 					[]byte(fmt.Sprintf(`{"type":"error","payload":{"message":"%s"}}`, processErr.Error())),
@@ -475,4 +551,17 @@ type VoiceJoinTokenDTO struct {
 type VoiceLeaveDTO struct {
 	GuildID  uint   `json:"guild_id" validate:"required"`
 	RoomName string `json:"room_name" validate:"required,min=2,max=128"`
+}
+
+func extractChannelID(raw json.RawMessage) (uint, error) {
+	var payload struct {
+		ChannelID uint `json:"channel_id"`
+	}
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		return 0, err
+	}
+	if payload.ChannelID == 0 {
+		return 0, errors.New("invalid channel id")
+	}
+	return payload.ChannelID, nil
 }

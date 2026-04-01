@@ -1,69 +1,86 @@
-# 🌌 Lumen
+# Lumen
 
-![Lumen Banner](<img width="2000" height="2000" alt="lumen" src="https://github.com/user-attachments/assets/3521d5b9-956f-475d-893b-8ee9c68bd9e7" />)
+**Lumen** - self-hosted чат-платформа в стиле Discord.  
+Текущий этап: **MVP backend готов к интеграции с frontend**.
 
-**Lumen** — современная self-hosted чат-платформа, вдохновленная Discord.  
-Проект находится в стадии активной разработки (MVP).
+## Что уже реализовано
 
-## 🚀 Текущий статус
+- **Auth:** `POST /api/auth/register`, `POST /api/auth/login`, JWT middleware, защищенные роуты.
+- **Guilds и Channels:** создание гильдий, вступление по invite, создание/список каналов.
+- **Сообщения:** отправка и чтение истории (`/api/channels/:channelID/messages`).
+- **WebSocket Gateway:** подписки на каналы, `MESSAGE_CREATE`, таргетированная доставка.
+- **Права:** проверка `PermSendMessages` при отправке сообщений.
+- **Rate limit:** Redis-ограничение отправки сообщений (по умолчанию `10` сообщений за `10` секунд на `user+channel`).
+- **Voice:** выдача LiveKit join token.
+- **Инфраструктура:** Docker Compose, миграции `golang-migrate`, конфиг через `cleanenv`.
 
-На данный момент реализовано ядро бэкенда:
-- **Auth:** middleware для проверки JWT и защиты маршрутов.
-- **Guilds:** создание серверов и вступление по инвайт-коду.
-- **Messages API:** чтение истории сообщений с проверкой доступа к гильдии.
-- **WebSocket Gateway:** события реального времени (`MESSAGE_CREATE`, `TYPING_START`, `PRESENCE_UPDATE`, `VOICE_STATE_UPDATE`).
-- **Real-time Engine:** Redis Pub/Sub + presence-статусы через Redis TTL.
-- **Voice:** эндпоинт генерации LiveKit join-токена.
-- **Database:** SQL-миграции в `backend/migrations`.
+## Технологии
 
-**В разработке:**
-- полный цикл авторизации (регистрация и логин);
-- CRUD текстовых и голосовых каналов;
-- UI/API для управления гильдиями;
-- фронтенд на Next.js 15.
+- **Backend:** Go, Fiber, GORM, PostgreSQL.
+- **Realtime:** WebSocket + Redis Pub/Sub.
+- **Voice:** LiveKit.
+- **Infra:** Docker, Docker Compose, Makefile.
 
-## 🛠 Технологический стек
+## Быстрый старт
 
-- **Backend:** Go (Fiber), PostgreSQL (GORM), Redis.
-- **Real-time:** WebSocket Gateway.
-- **Voice/Video:** LiveKit (интеграция токенов).
-- **DevOps:** Docker Compose, Makefile.
-
-## 📦 Быстрый старт
+### Вариант 1 (через Makefile)
 
 ```bash
-# 1. Клонируйте репозиторий
 git clone https://github.com/moongrammic/lumen.git
 cd lumen
-
-# 2. Настройте конфигурацию (JWT_SECRET, ключи LiveKit и т.д.)
 cp backend/.env.example backend/.env
-
-# 3. Запустите инфраструктуру
 make up
-
-# 4. Примените миграции БД
 make migrate
-
-# 5. Просмотр логов бэкенда
 make logs
 ```
 
-Доступные адреса:
-- Backend API + WebSocket: `http://localhost:8080`
-- Frontend: в разработке
+### Вариант 2 (если `make` не установлен, например Windows PowerShell)
 
-## 📋 Полезные команды
+```powershell
+git clone https://github.com/moongrammic/lumen.git
+cd lumen
+Copy-Item backend/.env.example backend/.env
+docker compose up -d --build
+docker compose exec -T backend go run ./cmd/migrate/main.go up
+docker compose logs -f backend
+```
 
-- `make up` — запустить сервисы в Docker.
-- `make down` — остановить сервисы.
-- `make build` — пересобрать контейнеры.
-- `make migrate` — применить SQL-миграции (up).
-- `make migrate-down` — откатить миграции (down).
+## Smoke/E2E тесты
 
-## ⚙️ Переменные окружения
+- HTTP smoke тест:
 
-Используйте `backend/.env.example` как источник актуальных переменных для локального запуска.
+```powershell
+./scripts/test-api.ps1
+```
 
----
-Lumen — Built for privacy, engineered for speed.
+- WebSocket e2e тест (подписки + таргетированная доставка):
+
+```powershell
+./scripts/test-ws.ps1
+```
+
+Оба теста должны завершаться `PASSED`.
+
+## Ключевые переменные окружения
+
+См. `backend/.env.example`.
+
+Основные:
+- `JWT_SECRET` - секрет подписи JWT.
+- `DB_*` - параметры PostgreSQL.
+- `REDIS_*` - параметры Redis и канал Pub/Sub.
+- `RATE_LIMIT_MESSAGES_PER_10S` - лимит сообщений на `10` секунд.
+- `LIVEKIT_*` - параметры интеграции LiveKit.
+
+## Полезные команды
+
+- `make up` / `make down` / `make restart`
+- `make build`
+- `make migrate` / `make migrate-down`
+- `make logs`
+
+## Ближайшие шаги
+
+- Запуск `frontend/` (Next.js) поверх текущего API/WS.
+- Улучшение WS reconnection handling.
+- Дальнейшая унификация формата ошибок WS/HTTP.

@@ -31,7 +31,6 @@ services:
       context: ./backend
       dockerfile: Dockerfile
     container_name: lumen-backend
-    # working_dir и command можно удалить, так как они теперь прописаны в Dockerfile
     volumes:
       - ./backend:/app
     env_file:
@@ -45,6 +44,11 @@ services:
         condition: service_healthy
       redis:
         condition: service_started
+    healthcheck:
+      test: ["CMD-SHELL", "wget --quiet --spider http://127.0.0.1:8080/api/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
     restart: unless-stopped
 
 volumes:

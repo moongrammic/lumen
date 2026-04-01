@@ -16,7 +16,7 @@ build:
 	docker compose up -d --build
 
 migrate:
-	docker compose exec backend go run ./cmd/migrate up
+	docker compose exec -T backend go run ./cmd/migrate/main.go up
 
 migrate-down:
-	docker compose exec backend go run ./cmd/migrate down
+	docker compose exec -T backend go run ./cmd/migrate/main.go down

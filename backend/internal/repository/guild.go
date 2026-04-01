@@ -26,6 +26,7 @@ func (r *GuildRepository) Create(ctx context.Context, guild *domain.Guild, owner
 			UserID:  ownerID,
 			Role:    "owner",
 			Permissions: domain.PermSendMessages |
+				domain.PermViewChannel |
 				domain.PermManageChannels |
 				domain.PermManageGuild,
 		}
@@ -61,6 +62,8 @@ func (r *GuildRepository) AddMemberIfNotExists(ctx context.Context, guildID uint
 		GuildID: guildID,
 		UserID:  userID,
 		Role:    "member",
+		Permissions: domain.PermSendMessages |
+			domain.PermViewChannel,
 	}
 	return r.db.WithContext(ctx).Create(&member).Error
 }

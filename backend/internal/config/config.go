@@ -8,12 +8,13 @@ import (
 )
 
 type Config struct {
-	App      AppConfig
-	DB       DBConfig
-	JWT      JWTConfig
-	Redis    RedisConfig
-	LiveKit  LiveKitConfig
-	Presence PresenceConfig
+	App       AppConfig
+	DB        DBConfig
+	JWT       JWTConfig
+	Redis     RedisConfig
+	LiveKit   LiveKitConfig
+	Presence  PresenceConfig
+	RateLimit RateLimitConfig
 }
 
 type AppConfig struct {
@@ -49,6 +50,10 @@ type LiveKitConfig struct {
 
 type PresenceConfig struct {
 	TTL time.Duration
+}
+
+type RateLimitConfig struct {
+	MessagesPer10s int `env:"RATE_LIMIT_MESSAGES_PER_10S" env-default:"10"`
 }
 
 func Load() (*Config, error) {
