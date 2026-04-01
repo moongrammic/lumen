@@ -39,9 +39,11 @@ func main() {
 	}
 	userRepo := repository.NewUserRepository(db)
 	userService := service.NewUserService(userRepo)
+	authService := service.NewAuthService(userRepo, cfg.JWT.Secret)
 	guildRepo := repository.NewGuildRepository(db)
 	guildService := service.NewGuildService(guildRepo)
 	messageRepo := repository.NewMessageRepository(db)
+	channelRepo := repository.NewChannelRepository(db)
 
 	app := fiber.New(fiber.Config{
 		AppName: "Lumen API v1.0",
@@ -54,16 +56,71 @@ func main() {
 		Max:        120,
 		Expiration: 60 * time.Second,
 	}))
+	app.Use("/api/auth", limiter.New(limiter.Config{
+		Max:        20,
+		Expiration: 60 * time.Second,
+	}))
 
 	// 3. Роуты
 	api := app.Group("/api")
 	hub := ws.NewHub(cfg.Redis)
-	chatService := service.NewChatService(messageRepo, hub)
+	chatService := service.NewChatService(messageRepo, guildRepo, hub)
+	channelService := service.NewChannelService(channelRepo, guildRepo)
 	voiceService := service.NewVoiceService(guildRepo, hub, cfg.LiveKit.APIKey, cfg.LiveKit.APISecret)
 	go hub.Run()
 
 	api.Get("/health", func(c *fiber.Ctx) error {
 		return c.JSON(fiber.Map{"status": "ok", "db": "connected"})
+	})
+
+	api.Post("/auth/register", func(c *fiber.Ctx) error {
+		var req RegisterDTO
+		if err := c.BodyParser(&req); err != nil {
+			return apierr.Write(c, fiber.StatusBadRequest, "invalid_body", "Некорректный JSON запроса")
+		}
+		if err := validate.Struct(req); err != nil {
+			return apierr.Write(c, fiber.StatusBadRequest, "validation_failed", err.Error())
+		}
+
+		resp, err := authService.Register(c.UserContext(), service.RegisterInput{
+			Username: req.Username,
+			Email:    req.Email,
+			Password: req.Password,
+		})
+		if err != nil {
+			if errors.Is(err, service.ErrEmailAlreadyExists) {
+				return apierr.Write(c, fiber.StatusConflict, "email_already_exists", "Пользователь с таким email уже существует")
+			}
+			if errors.Is(err, service.ErrUsernameAlreadyExists) {
+				return apierr.Write(c, fiber.StatusConflict, "username_already_exists", "Пользователь с таким username уже существует")
+			}
+			return apierr.Write(c, fiber.StatusInternalServerError, "register_failed", "Не удалось зарегистрировать пользователя")
+		}
+
+		return c.Status(fiber.StatusCreated).JSON(resp)
+	})
+
+	api.Post("/auth/login", func(c *fiber.Ctx) error {
+		var req LoginDTO
+		if err := c.BodyParser(&req); err != nil {
+			return apierr.Write(c, fiber.StatusBadRequest, "invalid_body", "Некорректный JSON запроса")
+		}
+		if err := validate.Struct(req); err != nil {
+			return apierr.Write(c, fiber.StatusBadRequest, "validation_failed", err.Error())
+		}
+
+		resp, err := authService.Login(c.UserContext(), service.LoginInput{
+			Email:    req.Email,
+			Password: req.Password,
+		})
+		if err != nil {
+			if errors.Is(err, service.ErrInvalidCredentials) {
+				return apierr.Write(c, fiber.StatusUnauthorized, "invalid_credentials", "Неверный email или пароль")
+			}
+			return apierr.Write(c, fiber.StatusInternalServerError, "login_failed", "Не удалось выполнить вход")
+		}
+
+		return c.JSON(resp)
 	})
 
 	api.Get("/me", middleware.JWTProtected(cfg.JWT.Secret), func(c *fiber.Ctx) error {
@@ -128,6 +185,59 @@ func main() {
 		return c.JSON(guild)
 	})
 
+	api.Post("/guilds/:guildID/channels", middleware.JWTProtected(cfg.JWT.Secret), middleware.GuildAccess(guildRepo), func(c *fiber.Ctx) error {
+		guildID64, err := strconv.ParseUint(c.Params("guildID"), 10, 32)
+		if err != nil {
+			return apierr.Write(c, fiber.StatusBadRequest, "invalid_guild_id", "Guild ID has invalid format")
+		}
+
+		var req CreateChannelDTO
+		if err := c.BodyParser(&req); err != nil {
+			return apierr.Write(c, fiber.StatusBadRequest, "invalid_body", "Некорректный JSON запроса")
+		}
+		if err := validate.Struct(req); err != nil {
+			return apierr.Write(c, fiber.StatusBadRequest, "validation_failed", err.Error())
+		}
+
+		userID, err := middleware.ExtractUserIDFromClaims(c.Locals("user"))
+		if err != nil {
+			return apierr.Write(c, fiber.StatusUnauthorized, "invalid_token_claims", err.Error())
+		}
+
+		channel, err := channelService.Create(c.UserContext(), uint(guildID64), userID, req.Name, req.Type)
+		if err != nil {
+			if errors.Is(err, service.ErrChannelAccessDenied) {
+				return apierr.Write(c, fiber.StatusForbidden, "channel_access_denied", "Пользователь не состоит в гильдии")
+			}
+			if errors.Is(err, service.ErrMissingManageChannels) {
+				return apierr.Write(c, fiber.StatusForbidden, "missing_manage_channels_permission", "Недостаточно прав для создания канала")
+			}
+			return apierr.Write(c, fiber.StatusBadRequest, "channel_create_failed", err.Error())
+		}
+
+		return c.Status(fiber.StatusCreated).JSON(channel)
+	})
+
+	api.Get("/guilds/:guildID/channels", middleware.JWTProtected(cfg.JWT.Secret), middleware.GuildAccess(guildRepo), func(c *fiber.Ctx) error {
+		guildID64, err := strconv.ParseUint(c.Params("guildID"), 10, 32)
+		if err != nil {
+			return apierr.Write(c, fiber.StatusBadRequest, "invalid_guild_id", "Guild ID has invalid format")
+		}
+		userID, err := middleware.ExtractUserIDFromClaims(c.Locals("user"))
+		if err != nil {
+			return apierr.Write(c, fiber.StatusUnauthorized, "invalid_token_claims", err.Error())
+		}
+
+		channels, err := channelService.ListByGuild(c.UserContext(), uint(guildID64), userID)
+		if err != nil {
+			if errors.Is(err, service.ErrChannelAccessDenied) {
+				return apierr.Write(c, fiber.StatusForbidden, "channel_access_denied", "Пользователь не состоит в гильдии")
+			}
+			return apierr.Write(c, fiber.StatusInternalServerError, "channels_list_failed", "Не удалось получить список каналов")
+		}
+		return c.JSON(fiber.Map{"channels": channels})
+	})
+
 	api.Get("/guilds/:guildID/channels/:channelID/messages", middleware.JWTProtected(cfg.JWT.Secret), middleware.GuildAccess(guildRepo), func(c *fiber.Ctx) error {
 		guildID, err := strconv.ParseUint(c.Params("guildID"), 10, 32)
 		if err != nil {
@@ -166,12 +276,76 @@ func main() {
 			limit = parsedLimit
 		}
 
-		result, err := chatService.ListMessages(c.UserContext(), uint(channelID), beforeID, limit)
+		userID, err := middleware.ExtractUserIDFromClaims(c.Locals("user"))
 		if err != nil {
+			return apierr.Write(c, fiber.StatusUnauthorized, "invalid_token_claims", err.Error())
+		}
+		result, err := chatService.ListMessages(c.UserContext(), userID, uint(channelID), beforeID, limit)
+		if err != nil {
+			if errors.Is(err, service.ErrChatAccessDenied) {
+				return apierr.Write(c, fiber.StatusForbidden, "chat_access_denied", "Нет доступа к каналу")
+			}
+			if errors.Is(err, service.ErrChannelNotFound) {
+				return apierr.Write(c, fiber.StatusNotFound, "channel_not_found", "Канал не найден")
+			}
 			return apierr.Write(c, fiber.StatusInternalServerError, "messages_list_failed", "Не удалось получить историю сообщений")
 		}
 
 		return c.JSON(result)
+	})
+
+	api.Post("/channels/:channelID/messages", middleware.JWTProtected(cfg.JWT.Secret), func(c *fiber.Ctx) error {
+		channelID64, err := strconv.ParseUint(c.Params("channelID"), 10, 32)
+		if err != nil {
+			return apierr.Write(c, fiber.StatusBadRequest, "invalid_channel_id", "Channel ID has invalid format")
+		}
+		var req CreateMessageDTO
+		if err := c.BodyParser(&req); err != nil {
+			return apierr.Write(c, fiber.StatusBadRequest, "invalid_body", "Некорректный JSON запроса")
+		}
+		if err := validate.Struct(req); err != nil {
+			return apierr.Write(c, fiber.StatusBadRequest, "validation_failed", err.Error())
+		}
+		userID, err := middleware.ExtractUserIDFromClaims(c.Locals("user"))
+		if err != nil {
+			return apierr.Write(c, fiber.StatusUnauthorized, "invalid_token_claims", err.Error())
+		}
+		msg, err := chatService.CreateMessage(c.UserContext(), userID, uint(channelID64), req.Content)
+		if err != nil {
+			if errors.Is(err, service.ErrChatAccessDenied) {
+				return apierr.Write(c, fiber.StatusForbidden, "chat_access_denied", "Нет доступа к каналу")
+			}
+			if errors.Is(err, service.ErrMissingSendPermission) {
+				return apierr.Write(c, fiber.StatusForbidden, "missing_send_permission", "Недостаточно прав для отправки сообщений")
+			}
+			if errors.Is(err, service.ErrChannelNotFound) {
+				return apierr.Write(c, fiber.StatusNotFound, "channel_not_found", "Канал не найден")
+			}
+			return apierr.Write(c, fiber.StatusBadRequest, "message_create_failed", err.Error())
+		}
+		return c.Status(fiber.StatusCreated).JSON(msg)
+	})
+
+	api.Get("/channels/:channelID/messages", middleware.JWTProtected(cfg.JWT.Secret), func(c *fiber.Ctx) error {
+		channelID64, err := strconv.ParseUint(c.Params("channelID"), 10, 32)
+		if err != nil {
+			return apierr.Write(c, fiber.StatusBadRequest, "invalid_channel_id", "Channel ID has invalid format")
+		}
+		userID, err := middleware.ExtractUserIDFromClaims(c.Locals("user"))
+		if err != nil {
+			return apierr.Write(c, fiber.StatusUnauthorized, "invalid_token_claims", err.Error())
+		}
+		messages, err := chatService.GetRecentMessages(c.UserContext(), userID, uint(channelID64))
+		if err != nil {
+			if errors.Is(err, service.ErrChatAccessDenied) {
+				return apierr.Write(c, fiber.StatusForbidden, "chat_access_denied", "Нет доступа к каналу")
+			}
+			if errors.Is(err, service.ErrChannelNotFound) {
+				return apierr.Write(c, fiber.StatusNotFound, "channel_not_found", "Канал не найден")
+			}
+			return apierr.Write(c, fiber.StatusInternalServerError, "messages_recent_failed", "Не удалось получить сообщения")
+		}
+		return c.JSON(fiber.Map{"messages": messages})
 	})
 
 	api.Post("/voice/join-token", middleware.JWTProtected(cfg.JWT.Secret), func(c *fiber.Ctx) error {
@@ -269,8 +443,28 @@ type CreateGuildDTO struct {
 	Name string `json:"name" validate:"required,min=3,max=32"`
 }
 
+type RegisterDTO struct {
+	Username string `json:"username" validate:"required,min=3,max=32"`
+	Email    string `json:"email" validate:"required,email"`
+	Password string `json:"password" validate:"required,min=8,max=72"`
+}
+
+type LoginDTO struct {
+	Email    string `json:"email" validate:"required,email"`
+	Password string `json:"password" validate:"required,min=8,max=72"`
+}
+
 type JoinGuildDTO struct {
 	InviteCode string `json:"invite_code" validate:"required,min=6,max=64"`
+}
+
+type CreateChannelDTO struct {
+	Name string `json:"name" validate:"required,min=1,max=64"`
+	Type string `json:"type" validate:"omitempty,oneof=text voice"`
+}
+
+type CreateMessageDTO struct {
+	Content string `json:"content" validate:"required,min=1,max=2000"`
 }
 
 type VoiceJoinTokenDTO struct {

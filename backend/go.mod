@@ -1,6 +1,6 @@
 module lumen
 
-go 1.26.1
+go 1.25.0
 
 require (
 	github.com/go-playground/validator/v10 v10.30.2
@@ -12,6 +12,7 @@ require (
 	github.com/ilyakaznacheev/cleanenv v1.5.0
 	github.com/livekit/protocol v1.45.1
 	github.com/redis/go-redis/v9 v9.18.0
+	golang.org/x/crypto v0.49.0
 	gorm.io/driver/postgres v1.5.11
 	gorm.io/gorm v1.30.0
 )
@@ -93,7 +94,6 @@ require (
 	go.uber.org/multierr v1.11.0 // indirect
 	go.uber.org/zap v1.27.0 // indirect
 	go.uber.org/zap/exp v0.3.0 // indirect
-	golang.org/x/crypto v0.49.0 // indirect
 	golang.org/x/exp v0.0.0-20250620022241-b7579e27df2b // indirect
 	golang.org/x/net v0.51.0 // indirect
 	golang.org/x/sync v0.20.0 // indirect

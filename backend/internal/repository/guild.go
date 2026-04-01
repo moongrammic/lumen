@@ -25,6 +25,9 @@ func (r *GuildRepository) Create(ctx context.Context, guild *domain.Guild, owner
 			GuildID: guild.ID,
 			UserID:  ownerID,
 			Role:    "owner",
+			Permissions: domain.PermSendMessages |
+				domain.PermManageChannels |
+				domain.PermManageGuild,
 		}
 		return tx.Create(&member).Error
 	})
@@ -71,6 +74,23 @@ func (r *GuildRepository) IsMember(ctx context.Context, guildID uint, userID uui
 		return false, err
 	}
 	return count > 0, nil
+}
+
+func (r *GuildRepository) GetMemberPermissions(ctx context.Context, guildID uint, userID uuid.UUID) (uint64, error) {
+	var member domain.GuildMember
+	if err := r.db.WithContext(ctx).
+		First(&member, "guild_id = ? AND user_id = ?", guildID, userID).Error; err != nil {
+		return 0, err
+	}
+	return member.Permissions, nil
+}
+
+func (r *GuildRepository) GetChannelGuildID(ctx context.Context, channelID uint) (uint, error) {
+	var channel domain.Channel
+	if err := r.db.WithContext(ctx).First(&channel, "id = ?", channelID).Error; err != nil {
+		return 0, err
+	}
+	return channel.GuildID, nil
 }
 
 func (r *GuildRepository) ChannelBelongsToGuild(ctx context.Context, channelID uint, guildID uint) (bool, error) {

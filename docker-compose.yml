@@ -27,10 +27,11 @@ services:
       - "6379:6379"
 
   backend:
-    image: golang:1.23-alpine
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
     container_name: lumen-backend
-    working_dir: /app
-    command: sh -c "go mod tidy && go run ./cmd/api"
+    # working_dir и command можно удалить, так как они теперь прописаны в Dockerfile
     volumes:
       - ./backend:/app
     env_file:

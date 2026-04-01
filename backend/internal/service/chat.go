@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"gorm.io/gorm"
 )
 
 type ChatRepository interface {
@@ -20,9 +21,16 @@ type ChatBroadcaster interface {
 	SetPresence(ctx context.Context, userID string, status string, ttl time.Duration) error
 }
 
+type ChatAccessChecker interface {
+	IsMember(ctx context.Context, guildID uint, userID uuid.UUID) (bool, error)
+	GetMemberPermissions(ctx context.Context, guildID uint, userID uuid.UUID) (uint64, error)
+	GetChannelGuildID(ctx context.Context, channelID uint) (uint, error)
+}
+
 type ChatService struct {
-	repo ChatRepository
-	hub  ChatBroadcaster
+	repo   ChatRepository
+	access ChatAccessChecker
+	hub    ChatBroadcaster
 }
 
 type AuthorDTO struct {
@@ -72,9 +80,12 @@ type ListMessagesResult struct {
 
 var ErrUnsupportedEventType = errors.New("unsupported event type")
 var ErrInvalidMessagePayload = errors.New("invalid message payload")
+var ErrChatAccessDenied = errors.New("chat access denied")
+var ErrMissingSendPermission = errors.New("missing send messages permission")
+var ErrChannelNotFound = errors.New("channel not found")
 
-func NewChatService(repo ChatRepository, hub ChatBroadcaster) *ChatService {
-	return &ChatService{repo: repo, hub: hub}
+func NewChatService(repo ChatRepository, access ChatAccessChecker, hub ChatBroadcaster) *ChatService {
+	return &ChatService{repo: repo, access: access, hub: hub}
 }
 
 func (s *ChatService) HandleIncomingEvent(ctx context.Context, authorID uuid.UUID, raw []byte) error {
@@ -117,6 +128,9 @@ func (s *ChatService) CreateMessage(
 ) (*MessagePayload, error) {
 	if channelID == 0 || content == "" {
 		return nil, ErrInvalidMessagePayload
+	}
+	if err := s.ensureCanSendMessage(ctx, authorID, channelID); err != nil {
+		return nil, err
 	}
 
 	message, err := s.repo.Create(ctx, &domain.Message{
@@ -170,10 +184,15 @@ func (s *ChatService) UpdatePresence(ctx context.Context, authorID uuid.UUID, st
 
 func (s *ChatService) ListMessages(
 	ctx context.Context,
+	userID uuid.UUID,
 	channelID uint,
 	beforeID *uint,
 	limit int,
 ) (*ListMessagesResult, error) {
+	if err := s.ensureCanReadChannel(ctx, userID, channelID); err != nil {
+		return nil, err
+	}
+
 	messages, nextCursor, err := s.repo.ListByChannel(ctx, channelID, beforeID, limit)
 	if err != nil {
 		return nil, err
@@ -190,12 +209,60 @@ func (s *ChatService) ListMessages(
 	}, nil
 }
 
-func (s *ChatService) GetRecentMessages(ctx context.Context, channelID uint) ([]domain.Message, error) {
+func (s *ChatService) GetRecentMessages(ctx context.Context, userID uuid.UUID, channelID uint) ([]domain.Message, error) {
+	if err := s.ensureCanReadChannel(ctx, userID, channelID); err != nil {
+		return nil, err
+	}
+
 	messages, _, err := s.repo.ListByChannel(ctx, channelID, nil, 50)
 	if err != nil {
 		return nil, err
 	}
 	return messages, nil
+}
+
+func (s *ChatService) ensureCanReadChannel(ctx context.Context, userID uuid.UUID, channelID uint) error {
+	guildID, err := s.access.GetChannelGuildID(ctx, channelID)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return ErrChannelNotFound
+		}
+		return err
+	}
+	isMember, err := s.access.IsMember(ctx, guildID, userID)
+	if err != nil {
+		return err
+	}
+	if !isMember {
+		return ErrChatAccessDenied
+	}
+	return nil
+}
+
+func (s *ChatService) ensureCanSendMessage(ctx context.Context, userID uuid.UUID, channelID uint) error {
+	guildID, err := s.access.GetChannelGuildID(ctx, channelID)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return ErrChannelNotFound
+		}
+		return err
+	}
+	isMember, err := s.access.IsMember(ctx, guildID, userID)
+	if err != nil {
+		return err
+	}
+	if !isMember {
+		return ErrChatAccessDenied
+	}
+
+	perms, err := s.access.GetMemberPermissions(ctx, guildID, userID)
+	if err != nil {
+		return err
+	}
+	if perms&domain.PermSendMessages == 0 {
+		return ErrMissingSendPermission
+	}
+	return nil
 }
 
 func toMessagePayload(message domain.Message) MessagePayload {
