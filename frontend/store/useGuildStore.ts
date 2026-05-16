@@ -2,25 +2,23 @@
 
 import { create } from "zustand";
 
-type Guild = { id: string; name: string };
-type Channel = { id: string; name: string };
+export type Guild = { id: string; name: string; invite_code: string; owner_id: string };
+export type Channel = { id: string; name: string; type?: string; guild_id?: number };
 
 type GuildState = {
   guilds: Guild[];
   channels: Channel[];
   currentGuildId: string | null;
-  setCurrentGuild: (guildId: string) => void;
+  setCurrentGuild: (guildId: string | null) => void;
+  setGuilds: (guilds: Guild[]) => void;
+  setChannels: (channels: Channel[]) => void;
 };
 
 export const useGuildStore = create<GuildState>((set) => ({
-  guilds: [
-    { id: "g-1", name: "Lumen" },
-    { id: "g-2", name: "Team" },
-  ],
-  channels: [
-    { id: "1", name: "general" },
-    { id: "2", name: "random" },
-  ],
-  currentGuildId: "g-1",
+  guilds: [],
+  channels: [],
+  currentGuildId: null,
   setCurrentGuild: (guildId) => set({ currentGuildId: guildId }),
+  setGuilds: (guilds) => set({ guilds }),
+  setChannels: (channels) => set({ channels }),
 }));
