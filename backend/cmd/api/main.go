@@ -171,6 +171,20 @@ func main() {
 		return c.Status(fiber.StatusCreated).JSON(guild)
 	})
 
+	api.Get("/guilds", middleware.JWTProtected(cfg.JWT.Secret), func(c *fiber.Ctx) error {
+		userID, err := middleware.ExtractUserIDFromClaims(c.Locals("user"))
+		if err != nil {
+			return apierr.Write(c, fiber.StatusUnauthorized, "invalid_token_claims", err.Error())
+		}
+
+		guilds, err := guildService.ListByUser(c.UserContext(), userID)
+		if err != nil {
+			return apierr.Write(c, fiber.StatusInternalServerError, "guilds_list_failed", "Не удалось получить список серверов")
+		}
+
+		return c.JSON(fiber.Map{"guilds": guilds})
+	})
+
 	api.Post("/guilds/join", middleware.JWTProtected(cfg.JWT.Secret), func(c *fiber.Ctx) error {
 		var req JoinGuildDTO
 		if err := c.BodyParser(&req); err != nil {

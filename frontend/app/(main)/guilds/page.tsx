@@ -1,5 +1,7 @@
-import { redirect } from "next/navigation";
-
 export default function GuildsPage() {
-  redirect("/channels/1");
+  return (
+    <div className="flex h-screen items-center justify-center bg-zinc-950 text-zinc-500">
+      Select a server to get started
+    </div>
+  );
 }

@@ -13,6 +13,7 @@ type GuildRepository interface {
 	Create(ctx context.Context, guild *domain.Guild, ownerID uuid.UUID) (*domain.Guild, error)
 	FindByInviteCode(ctx context.Context, inviteCode string) (*domain.Guild, error)
 	AddMemberIfNotExists(ctx context.Context, guildID uint, userID uuid.UUID) error
+	GetUserGuilds(ctx context.Context, userID uuid.UUID) ([]*domain.Guild, error)
 }
 
 type GuildService struct {
@@ -53,6 +54,24 @@ func (s *GuildService) Create(ctx context.Context, name string, ownerID uuid.UUI
 		InviteCode: guild.InviteCode,
 		OwnerID:    guild.OwnerID,
 	}, nil
+}
+
+func (s *GuildService) ListByUser(ctx context.Context, userID uuid.UUID) ([]GuildDTO, error) {
+	guilds, err := s.repo.GetUserGuilds(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+
+	result := make([]GuildDTO, 0, len(guilds))
+	for _, g := range guilds {
+		result = append(result, GuildDTO{
+			ID:         g.ID,
+			Name:       g.Name,
+			InviteCode: g.InviteCode,
+			OwnerID:    g.OwnerID,
+		})
+	}
+	return result, nil
 }
 
 func (s *GuildService) JoinByInvite(ctx context.Context, inviteCode string, userID uuid.UUID) (*GuildDTO, error) {
