@@ -25,7 +25,7 @@ func JWTProtected(secret string) fiber.Handler {
 
 		claims, err := ParseJWTFromString(secret, tokenString)
 		if err != nil {
-			return apierr.Write(c, fiber.StatusUnauthorized, "invalid_token", err.Error())
+			return apierr.Write(c, fiber.StatusUnauthorized, "invalid_token", "Invalid or expired token")
 		}
 		c.Locals("user", claims)
 		return c.Next()

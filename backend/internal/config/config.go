@@ -18,7 +18,8 @@ type Config struct {
 }
 
 type AppConfig struct {
-	Port string `env:"PORT" env-default:"8080"`
+	Port        string `env:"PORT" env-default:"8080"`
+	CORSOrigins string `env:"CORS_ORIGINS" env-default:"http://localhost:3000,http://127.0.0.1:3000"`
 }
 
 type DBConfig struct {

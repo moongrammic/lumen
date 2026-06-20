@@ -30,7 +30,14 @@ func (r *GuildRepository) Create(ctx context.Context, guild *domain.Guild, owner
 				domain.PermManageChannels |
 				domain.PermManageGuild,
 		}
-		return tx.Create(&member).Error
+		if err := tx.Create(&member).Error; err != nil {
+			return err
+		}
+		return tx.Create(&domain.Channel{
+			Name:    "general",
+			GuildID: guild.ID,
+			Type:    "text",
+		}).Error
 	})
 	if err != nil {
 		return nil, err
@@ -116,4 +123,62 @@ func (r *GuildRepository) GetUserGuilds(ctx context.Context, userID uuid.UUID) (
 		return nil, err
 	}
 	return guilds, nil
+}
+
+func (r *GuildRepository) GetByID(ctx context.Context, guildID uint) (*domain.Guild, error) {
+	var guild domain.Guild
+	if err := r.db.WithContext(ctx).First(&guild, "id = ?", guildID).Error; err != nil {
+		return nil, err
+	}
+	return &guild, nil
+}
+
+func (r *GuildRepository) UpdateFields(ctx context.Context, guildID uint, fields map[string]any) error {
+	if len(fields) == 0 {
+		return nil
+	}
+	return r.db.WithContext(ctx).
+		Model(&domain.Guild{}).
+		Where("id = ?", guildID).
+		Updates(fields).Error
+}
+
+func (r *GuildRepository) Delete(ctx context.Context, guildID uint) error {
+	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Where("guild_id = ?", guildID).Delete(&domain.Channel{}).Error; err != nil {
+			return err
+		}
+		if err := tx.Where("guild_id = ?", guildID).Delete(&domain.GuildMember{}).Error; err != nil {
+			return err
+		}
+		return tx.Delete(&domain.Guild{}, guildID).Error
+	})
+}
+
+func (r *GuildRepository) RemoveMember(ctx context.Context, guildID uint, userID uuid.UUID) (int64, error) {
+	res := r.db.WithContext(ctx).
+		Where("guild_id = ? AND user_id = ?", guildID, userID).
+		Delete(&domain.GuildMember{})
+	return res.RowsAffected, res.Error
+}
+
+type GuildMemberRow struct {
+	UserID      uuid.UUID
+	Username    string
+	Role        string
+	Permissions uint64
+}
+
+func (r *GuildRepository) ListMembers(ctx context.Context, guildID uint) ([]GuildMemberRow, error) {
+	var rows []GuildMemberRow
+	if err := r.db.WithContext(ctx).
+		Table("guild_members").
+		Select("guild_members.user_id, users.username, guild_members.role, guild_members.permissions").
+		Joins("JOIN users ON users.id = guild_members.user_id").
+		Where("guild_members.guild_id = ? AND guild_members.deleted_at IS NULL AND users.deleted_at IS NULL", guildID).
+		Order("guild_members.created_at ASC").
+		Scan(&rows).Error; err != nil {
+		return nil, err
+	}
+	return rows, nil
 }

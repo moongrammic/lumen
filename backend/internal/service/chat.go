@@ -4,12 +4,16 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"lumen/internal/domain"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
 	"gorm.io/gorm"
 )
+
+const maxMessageContentLen = 2000
 
 type ChatRepository interface {
 	Create(ctx context.Context, message *domain.Message) (*domain.Message, error)
@@ -122,11 +126,7 @@ func (s *ChatService) HandleIncomingEvent(ctx context.Context, authorID uuid.UUI
 		}
 		return s.BroadcastTyping(ctx, authorID, payload.ChannelID)
 	case "PRESENCE_UPDATE":
-		var payload PresencePayload
-		if err := json.Unmarshal(incoming.Payload, &payload); err != nil {
-			return ErrInvalidMessagePayload
-		}
-		return s.UpdatePresence(ctx, authorID, payload.Status, 60*time.Second)
+		return ErrUnsupportedEventType
 	default:
 		return ErrUnsupportedEventType
 	}
@@ -138,7 +138,8 @@ func (s *ChatService) CreateMessage(
 	channelID uint,
 	content string,
 ) (*MessagePayload, error) {
-	if channelID == 0 || content == "" {
+	content = strings.TrimSpace(content)
+	if channelID == 0 || content == "" || len(content) > maxMessageContentLen {
 		return nil, ErrInvalidMessagePayload
 	}
 	if err := s.ensureCanSendMessage(ctx, authorID, channelID); err != nil {
@@ -169,13 +170,16 @@ func (s *ChatService) CreateMessage(
 		Event:   "MESSAGE_CREATE",
 		Payload: payload,
 	}); err != nil {
-		return nil, err
+		slog.Warn("message broadcast failed", "message_id", payload.ID, "error", err)
 	}
 
 	return &payload, nil
 }
 
 func (s *ChatService) BroadcastTyping(ctx context.Context, authorID uuid.UUID, channelID uint) error {
+	if err := s.ensureCanReadChannel(ctx, authorID, channelID); err != nil {
+		return err
+	}
 	return s.hub.Broadcast(Event{
 		Op:    0,
 		Event: "TYPING_START",
@@ -261,23 +265,29 @@ func (s *ChatService) ensureCanReadChannel(ctx context.Context, userID uuid.UUID
 	if !isMember {
 		return ErrChatAccessDenied
 	}
+
+	perms, err := s.access.GetMemberPermissions(ctx, guildID, userID)
+	if err != nil {
+		return err
+	}
+	member := domain.GuildMember{Permissions: perms}
+	if !member.HasPermission(domain.PermViewChannel) {
+		return ErrInsufficientPermissions
+	}
 	return nil
 }
 
 func (s *ChatService) ensureCanSendMessage(ctx context.Context, userID uuid.UUID, channelID uint) error {
+	if err := s.ensureCanReadChannel(ctx, userID, channelID); err != nil {
+		return err
+	}
+
 	guildID, err := s.access.GetChannelGuildID(ctx, channelID)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return ErrChannelNotFound
 		}
 		return err
-	}
-	isMember, err := s.access.IsMember(ctx, guildID, userID)
-	if err != nil {
-		return err
-	}
-	if !isMember {
-		return ErrChatAccessDenied
 	}
 
 	perms, err := s.access.GetMemberPermissions(ctx, guildID, userID)

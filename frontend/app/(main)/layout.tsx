@@ -8,7 +8,7 @@ type MainLayoutProps = {
 
 export default function MainLayout({ children }: MainLayoutProps) {
   return (
-    <div className="grid min-h-screen grid-cols-[72px_260px_1fr] bg-zinc-950 text-zinc-100">
+    <div className="grid min-h-screen grid-cols-[80px_260px_1fr] bg-zinc-950 text-zinc-100">
       <ServerList />
       <aside className="border-x border-zinc-800 bg-zinc-900">
         <ChannelList />

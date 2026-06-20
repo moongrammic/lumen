@@ -4,13 +4,18 @@ import (
 	"context"
 	"errors"
 	"lumen/internal/domain"
+	"strings"
 
 	"github.com/google/uuid"
+	"gorm.io/gorm"
 )
 
 type ChannelRepository interface {
 	Create(ctx context.Context, channel *domain.Channel) (*domain.Channel, error)
 	ListByGuild(ctx context.Context, guildID uint) ([]domain.Channel, error)
+	GetByID(ctx context.Context, channelID uint) (*domain.Channel, error)
+	UpdateFields(ctx context.Context, channelID uint, fields map[string]any) error
+	Delete(ctx context.Context, channelID uint) error
 }
 
 type ChannelAccessChecker interface {
@@ -32,6 +37,7 @@ type ChannelDTO struct {
 
 var ErrChannelAccessDenied = errors.New("channel access denied")
 var ErrMissingManageChannels = errors.New("missing manage channels permission")
+var ErrChannelNotFoundInGuild = errors.New("channel not found in guild")
 
 func NewChannelService(repo ChannelRepository, access ChannelAccessChecker) *ChannelService {
 	return &ChannelService{repo: repo, access: access}
@@ -89,6 +95,72 @@ func (s *ChannelService) ListByGuild(ctx context.Context, guildID uint, userID u
 		})
 	}
 	return result, nil
+}
+
+func (s *ChannelService) UpdateChannel(ctx context.Context, guildID uint, channelID uint, userID uuid.UUID, name *string, channelType *string) (*ChannelDTO, error) {
+	if err := s.ensureCanManageChannels(ctx, guildID, userID); err != nil {
+		return nil, err
+	}
+
+	channel, err := s.repo.GetByID(ctx, channelID)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, ErrChannelNotFoundInGuild
+		}
+		return nil, err
+	}
+	if channel.GuildID != guildID {
+		return nil, ErrChannelNotFoundInGuild
+	}
+
+	fields := map[string]any{}
+	if name != nil {
+		trimmed := strings.TrimSpace(*name)
+		if trimmed == "" {
+			return nil, errors.New("channel name cannot be empty")
+		}
+		fields["name"] = trimmed
+	}
+	if channelType != nil {
+		if *channelType != "text" && *channelType != "voice" {
+			return nil, errors.New("channel type must be text or voice")
+		}
+		fields["type"] = *channelType
+	}
+
+	if err := s.repo.UpdateFields(ctx, channelID, fields); err != nil {
+		return nil, err
+	}
+
+	updated, err := s.repo.GetByID(ctx, channelID)
+	if err != nil {
+		return nil, err
+	}
+	return &ChannelDTO{
+		ID:      updated.ID,
+		Name:    updated.Name,
+		GuildID: updated.GuildID,
+		Type:    updated.Type,
+	}, nil
+}
+
+func (s *ChannelService) DeleteChannel(ctx context.Context, guildID uint, channelID uint, userID uuid.UUID) error {
+	if err := s.ensureCanManageChannels(ctx, guildID, userID); err != nil {
+		return err
+	}
+
+	channel, err := s.repo.GetByID(ctx, channelID)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return ErrChannelNotFoundInGuild
+		}
+		return err
+	}
+	if channel.GuildID != guildID {
+		return ErrChannelNotFoundInGuild
+	}
+
+	return s.repo.Delete(ctx, channelID)
 }
 
 func (s *ChannelService) ensureCanManageChannels(ctx context.Context, guildID uint, userID uuid.UUID) error {

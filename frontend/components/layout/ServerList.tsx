@@ -1,68 +1,111 @@
 "use client";
 
-import { useLayoutEffect } from "react";
-import { useQuery } from "@tanstack/react-query";
-import { api } from "@/lib/api";
-import { useGuildStore, type Guild } from "@/store/useGuildStore";
+import Link from "next/link";
+import { Plus } from "lucide-react";
+import { useRouter } from "next/navigation";
+import { useEffect, useState } from "react";
+import { useGuildStore } from "@/store/useGuildStore";
 import { useAuthStore } from "@/store/useAuthStore";
 
-type GuildsApiResponse = {
-  guilds: Guild[];
-};
+function GuildIcon({ name, iconUrl }: { name: string; iconUrl: string }) {
+  const [imageFailed, setImageFailed] = useState(false);
+  const url = iconUrl.trim();
 
-export function ServerList() {
-  const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
-  const guilds = useGuildStore((state) => state.guilds);
-  const currentGuildId = useGuildStore((state) => state.currentGuildId);
-  const setCurrentGuild = useGuildStore((state) => state.setCurrentGuild);
-  const setGuilds = useGuildStore((state) => state.setGuilds);
-
-  const query = useQuery({
-    queryKey: ["guilds"],
-    enabled: isAuthenticated,
-    queryFn: async () => {
-      const { data } = await api.get<GuildsApiResponse>("/guilds");
-      return data.guilds;
-    },
-  });
-
-  useLayoutEffect(() => {
-    if (query.data) {
-      setGuilds(query.data);
-    }
-  }, [query.data, setGuilds]);
-
-  if (query.isPending) {
+  if (url && !imageFailed) {
     return (
-      <nav className="flex flex-col gap-3 border-r border-zinc-800 bg-zinc-900 p-3">
-        <div className="h-12 w-12 animate-pulse rounded-2xl bg-zinc-800" />
-        <div className="h-12 w-12 animate-pulse rounded-2xl bg-zinc-800" />
-      </nav>
-    );
-  }
-
-  if (query.isError) {
-    return (
-      <nav className="flex flex-col gap-3 border-r border-zinc-800 bg-zinc-900 p-3">
-        <div className="text-xs text-red-500 text-center">Error</div>
-      </nav>
+      <img
+        src={url}
+        alt=""
+        className="h-full w-full rounded-full object-cover"
+        onError={() => setImageFailed(true)}
+      />
     );
   }
 
   return (
-    <nav className="flex flex-col gap-3 border-r border-zinc-800 bg-zinc-900 p-3">
+    <span className="flex h-full w-full items-center justify-center text-sm font-bold">
+      {name.slice(0, 2).toUpperCase()}
+    </span>
+  );
+}
+
+export function ServerList() {
+  const router = useRouter();
+  const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
+  const guilds = useGuildStore((state) => state.guilds);
+  const currentGuildId = useGuildStore((state) => state.currentGuildId);
+  const fetchGuilds = useGuildStore((state) => state.fetchGuilds);
+  const fetchChannels = useGuildStore((state) => state.fetchChannels);
+  const createGuild = useGuildStore((state) => state.createGuild);
+  const setCurrentGuild = useGuildStore((state) => state.setCurrentGuild);
+
+  useEffect(() => {
+    if (isAuthenticated) {
+      void fetchGuilds();
+    }
+  }, [fetchGuilds, isAuthenticated]);
+
+  const openGuild = async (guildId: string) => {
+    setCurrentGuild(guildId);
+    const channels = await fetchChannels(guildId);
+    const firstText = channels.find((channel) => channel.type === "text") ?? channels[0];
+    if (firstText) {
+      router.push(`/channels/${firstText.id}`);
+    } else {
+      router.push("/guilds");
+    }
+  };
+
+  const handleCreateGuild = async () => {
+    const name = prompt("Название сервера:");
+    if (!name?.trim()) return;
+
+    const trimmed = name.trim();
+    if (trimmed.length < 3 || trimmed.length > 32) {
+      alert("Название сервера: от 3 до 32 символов");
+      return;
+    }
+
+    const result = await createGuild(trimmed);
+    if (result?.firstChannelId) {
+      router.push(`/channels/${result.firstChannelId}`);
+    }
+  };
+
+  return (
+    <nav className="flex w-20 flex-col items-center gap-2 overflow-y-auto bg-[#202225] py-3">
+      <Link
+        href="/guilds"
+        className="flex h-12 w-12 cursor-pointer items-center justify-center rounded-full bg-[#36393f] transition-all hover:rounded-2xl"
+        title="Home"
+      >
+        🏠
+      </Link>
+
+      <div className="my-2 h-[2px] w-8 bg-[#292b2f]" />
+
       {guilds.map((guild) => (
         <button
           key={guild.id}
           type="button"
-          onClick={() => setCurrentGuild(guild.id)}
-          className={`h-12 w-12 rounded-2xl text-sm font-semibold transition-colors flex items-center justify-center ${
-            currentGuildId === guild.id ? "bg-indigo-600 text-white" : "bg-zinc-800 text-zinc-200 hover:bg-indigo-500 hover:text-white"
+          onClick={() => void openGuild(guild.id)}
+          className={`flex h-12 w-12 cursor-pointer items-center justify-center overflow-hidden rounded-full text-white transition-all hover:rounded-2xl ${
+            currentGuildId === guild.id ? "rounded-2xl bg-[#5865f2]" : "bg-[#5865f2]/80 hover:bg-[#5865f2]"
           }`}
+          title={guild.name}
         >
-          {guild.name.slice(0, 2).toUpperCase()}
+          <GuildIcon name={guild.name} iconUrl={guild.icon_url} />
         </button>
       ))}
+
+      <button
+        type="button"
+        onClick={() => void handleCreateGuild()}
+        className="mt-2 flex h-12 w-12 cursor-pointer items-center justify-center rounded-full bg-[#3ba55c] text-white transition-all hover:rounded-2xl hover:bg-[#3ba55c]/80"
+        title="Create server"
+      >
+        <Plus size={28} />
+      </button>
     </nav>
   );
 }

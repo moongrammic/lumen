@@ -6,6 +6,7 @@ import { useRouter } from "next/navigation";
 import { useAuthStore, type AuthState } from "@/store/useAuthStore";
 
 export default function RegisterPage() {
+  const [username, setUsername] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const register = useAuthStore((state: AuthState) => state.register);
@@ -13,7 +14,7 @@ export default function RegisterPage() {
 
   const onSubmit = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    const ok = await register(email, password);
+    const ok = await register(username, email, password);
     if (ok) router.push("/guilds");
   };
 
@@ -23,9 +24,20 @@ export default function RegisterPage() {
         <h1 className="text-xl font-semibold text-white">Register</h1>
         <input
           className="w-full rounded-md border border-zinc-700 bg-zinc-800 p-2 text-white"
+          placeholder="Username"
+          type="text"
+          value={username}
+          minLength={3}
+          maxLength={32}
+          required
+          onChange={(event) => setUsername(event.target.value)}
+        />
+        <input
+          className="w-full rounded-md border border-zinc-700 bg-zinc-800 p-2 text-white"
           placeholder="Email"
           type="email"
           value={email}
+          required
           onChange={(event) => setEmail(event.target.value)}
         />
         <input
@@ -33,6 +45,8 @@ export default function RegisterPage() {
           placeholder="Password"
           type="password"
           value={password}
+          minLength={8}
+          required
           onChange={(event) => setPassword(event.target.value)}
         />
         <button className="w-full rounded-md bg-indigo-600 p-2 font-medium text-white" type="submit">

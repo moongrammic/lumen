@@ -32,3 +32,25 @@ func (r *ChannelRepository) ListByGuild(ctx context.Context, guildID uint) ([]do
 	}
 	return channels, nil
 }
+
+func (r *ChannelRepository) GetByID(ctx context.Context, channelID uint) (*domain.Channel, error) {
+	var channel domain.Channel
+	if err := r.db.WithContext(ctx).First(&channel, "id = ?", channelID).Error; err != nil {
+		return nil, err
+	}
+	return &channel, nil
+}
+
+func (r *ChannelRepository) UpdateFields(ctx context.Context, channelID uint, fields map[string]any) error {
+	if len(fields) == 0 {
+		return nil
+	}
+	return r.db.WithContext(ctx).
+		Model(&domain.Channel{}).
+		Where("id = ?", channelID).
+		Updates(fields).Error
+}
+
+func (r *ChannelRepository) Delete(ctx context.Context, channelID uint) error {
+	return r.db.WithContext(ctx).Delete(&domain.Channel{}, channelID).Error
+}

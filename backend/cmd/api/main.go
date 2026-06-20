@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"lumen/internal/config"
+	"lumen/internal/domain"
 	"lumen/internal/middleware"
 	"lumen/internal/repository"
 	"lumen/internal/service"
@@ -21,6 +22,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/gofiber/contrib/websocket"
 	"github.com/gofiber/fiber/v2"
+	"github.com/gofiber/fiber/v2/middleware/cors"
 	"github.com/gofiber/fiber/v2/middleware/limiter"
 	"github.com/gofiber/fiber/v2/middleware/logger"
 	"github.com/gofiber/fiber/v2/middleware/recover"
@@ -45,7 +47,7 @@ func main() {
 	userService := service.NewUserService(userRepo)
 	authService := service.NewAuthService(userRepo, cfg.JWT.Secret)
 	guildRepo := repository.NewGuildRepository(db)
-	guildService := service.NewGuildService(guildRepo)
+	guildService := service.NewGuildService(guildRepo, userRepo)
 	messageRepo := repository.NewMessageRepository(db)
 	channelRepo := repository.NewChannelRepository(db)
 
@@ -54,11 +56,22 @@ func main() {
 	})
 
 	// 2. Middlewares
-	app.Use(logger.New())
 	app.Use(recover.New())
+	app.Use(logger.New())
+	app.Use(cors.New(cors.Config{
+		AllowOrigins:     cfg.App.CORSOrigins,
+		AllowMethods:     "GET,POST,PUT,PATCH,DELETE,OPTIONS",
+		AllowHeaders:     "Origin,Content-Type,Accept,Authorization",
+		AllowCredentials: true,
+		MaxAge:           300,
+	}))
 	app.Use("/api", limiter.New(limiter.Config{
 		Max:        120,
 		Expiration: 60 * time.Second,
+		Next: func(c *fiber.Ctx) bool {
+			// Session bootstrap relies on /api/me; avoid accidental logout on limiter bursts.
+			return c.Path() == "/api/me"
+		},
 	}))
 	app.Use("/api/auth", limiter.New(limiter.Config{
 		Max:        20,
@@ -80,7 +93,17 @@ func main() {
 	go hub.Run()
 
 	api.Get("/health", func(c *fiber.Ctx) error {
-		return c.JSON(fiber.Map{"status": "ok", "db": "connected"})
+		status := fiber.Map{"status": "ok", "db": "connected"}
+		sqlDB, err := db.DB()
+		if err != nil {
+			status["db"] = "error"
+			return c.Status(fiber.StatusServiceUnavailable).JSON(status)
+		}
+		if err := sqlDB.Ping(); err != nil {
+			status["db"] = "error"
+			return c.Status(fiber.StatusServiceUnavailable).JSON(status)
+		}
+		return c.JSON(status)
 	})
 
 	api.Post("/auth/register", func(c *fiber.Ctx) error {
@@ -209,6 +232,164 @@ func main() {
 		return c.JSON(guild)
 	})
 
+	api.Patch("/guilds/:guildID", middleware.JWTProtected(cfg.JWT.Secret), middleware.GuildAccess(guildRepo), func(c *fiber.Ctx) error {
+		guildID64, err := strconv.ParseUint(c.Params("guildID"), 10, 32)
+		if err != nil {
+			return apierr.Write(c, fiber.StatusBadRequest, "invalid_guild_id", "Guild ID has invalid format")
+		}
+
+		var req UpdateGuildDTO
+		if err := c.BodyParser(&req); err != nil {
+			return apierr.Write(c, fiber.StatusBadRequest, "invalid_body", "Некорректный JSON запроса")
+		}
+		if err := validate.Struct(req); err != nil {
+			return apierr.Write(c, fiber.StatusBadRequest, "validation_failed", err.Error())
+		}
+
+		userID, err := middleware.ExtractUserIDFromClaims(c.Locals("user"))
+		if err != nil {
+			return apierr.Write(c, fiber.StatusUnauthorized, "invalid_token_claims", err.Error())
+		}
+
+		guild, err := guildService.UpdateGuild(c.UserContext(), uint(guildID64), userID, service.UpdateGuildInput{
+			Name:        req.Name,
+			IconURL:     req.IconURL,
+			Description: req.Description,
+		})
+		if err != nil {
+			if errors.Is(err, service.ErrGuildAccessDenied) {
+				return apierr.Write(c, fiber.StatusForbidden, "guild_access_denied", "Пользователь не состоит в гильдии")
+			}
+			if errors.Is(err, service.ErrMissingManageGuild) {
+				return apierr.Write(c, fiber.StatusForbidden, "missing_manage_guild_permission", "Недостаточно прав для изменения сервера")
+			}
+			if errors.Is(err, service.ErrGuildNotFound) {
+				return apierr.Write(c, fiber.StatusNotFound, "guild_not_found", "Сервер не найден")
+			}
+			return apierr.Write(c, fiber.StatusBadRequest, "guild_update_failed", err.Error())
+		}
+		return c.JSON(guild)
+	})
+
+	api.Delete("/guilds/:guildID", middleware.JWTProtected(cfg.JWT.Secret), middleware.GuildAccess(guildRepo), func(c *fiber.Ctx) error {
+		guildID64, err := strconv.ParseUint(c.Params("guildID"), 10, 32)
+		if err != nil {
+			return apierr.Write(c, fiber.StatusBadRequest, "invalid_guild_id", "Guild ID has invalid format")
+		}
+
+		userID, err := middleware.ExtractUserIDFromClaims(c.Locals("user"))
+		if err != nil {
+			return apierr.Write(c, fiber.StatusUnauthorized, "invalid_token_claims", err.Error())
+		}
+
+		if err := guildService.DeleteGuild(c.UserContext(), uint(guildID64), userID); err != nil {
+			if errors.Is(err, service.ErrNotGuildOwner) {
+				return apierr.Write(c, fiber.StatusForbidden, "not_guild_owner", "Только владелец может удалить сервер")
+			}
+			if errors.Is(err, service.ErrGuildNotFound) {
+				return apierr.Write(c, fiber.StatusNotFound, "guild_not_found", "Сервер не найден")
+			}
+			return apierr.Write(c, fiber.StatusBadRequest, "guild_delete_failed", err.Error())
+		}
+		return c.JSON(fiber.Map{"ok": true})
+	})
+
+	api.Get("/guilds/:guildID/members", middleware.JWTProtected(cfg.JWT.Secret), middleware.GuildAccess(guildRepo), func(c *fiber.Ctx) error {
+		guildID64, err := strconv.ParseUint(c.Params("guildID"), 10, 32)
+		if err != nil {
+			return apierr.Write(c, fiber.StatusBadRequest, "invalid_guild_id", "Guild ID has invalid format")
+		}
+
+		userID, err := middleware.ExtractUserIDFromClaims(c.Locals("user"))
+		if err != nil {
+			return apierr.Write(c, fiber.StatusUnauthorized, "invalid_token_claims", err.Error())
+		}
+
+		members, err := guildService.ListMembers(c.UserContext(), uint(guildID64), userID)
+		if err != nil {
+			if errors.Is(err, service.ErrGuildAccessDenied) {
+				return apierr.Write(c, fiber.StatusForbidden, "guild_access_denied", "Пользователь не состоит в гильдии")
+			}
+			if errors.Is(err, service.ErrGuildNotFound) {
+				return apierr.Write(c, fiber.StatusNotFound, "guild_not_found", "Сервер не найден")
+			}
+			return apierr.Write(c, fiber.StatusInternalServerError, "members_list_failed", "Не удалось получить список участников")
+		}
+		return c.JSON(fiber.Map{"members": members})
+	})
+
+	api.Post("/guilds/:guildID/members", middleware.JWTProtected(cfg.JWT.Secret), middleware.GuildAccess(guildRepo), func(c *fiber.Ctx) error {
+		guildID64, err := strconv.ParseUint(c.Params("guildID"), 10, 32)
+		if err != nil {
+			return apierr.Write(c, fiber.StatusBadRequest, "invalid_guild_id", "Guild ID has invalid format")
+		}
+
+		var req AddMemberDTO
+		if err := c.BodyParser(&req); err != nil {
+			return apierr.Write(c, fiber.StatusBadRequest, "invalid_body", "Некорректный JSON запроса")
+		}
+		if err := validate.Struct(req); err != nil {
+			return apierr.Write(c, fiber.StatusBadRequest, "validation_failed", err.Error())
+		}
+
+		userID, err := middleware.ExtractUserIDFromClaims(c.Locals("user"))
+		if err != nil {
+			return apierr.Write(c, fiber.StatusUnauthorized, "invalid_token_claims", err.Error())
+		}
+
+		member, err := guildService.AddMember(c.UserContext(), uint(guildID64), userID, req.Username)
+		if err != nil {
+			if errors.Is(err, service.ErrGuildAccessDenied) {
+				return apierr.Write(c, fiber.StatusForbidden, "guild_access_denied", "Пользователь не состоит в гильдии")
+			}
+			if errors.Is(err, service.ErrMissingManageGuild) {
+				return apierr.Write(c, fiber.StatusForbidden, "missing_manage_guild_permission", "Недостаточно прав для управления участниками")
+			}
+			if errors.Is(err, service.ErrMemberUserNotFound) {
+				return apierr.Write(c, fiber.StatusNotFound, "user_not_found", "Пользователь с таким username не найден")
+			}
+			return apierr.Write(c, fiber.StatusBadRequest, "member_add_failed", err.Error())
+		}
+		return c.Status(fiber.StatusCreated).JSON(member)
+	})
+
+	api.Delete("/guilds/:guildID/members/:userID", middleware.JWTProtected(cfg.JWT.Secret), middleware.GuildAccess(guildRepo), func(c *fiber.Ctx) error {
+		guildID64, err := strconv.ParseUint(c.Params("guildID"), 10, 32)
+		if err != nil {
+			return apierr.Write(c, fiber.StatusBadRequest, "invalid_guild_id", "Guild ID has invalid format")
+		}
+
+		targetID, err := uuid.Parse(c.Params("userID"))
+		if err != nil {
+			return apierr.Write(c, fiber.StatusBadRequest, "invalid_user_id", "User ID has invalid format")
+		}
+
+		actorID, err := middleware.ExtractUserIDFromClaims(c.Locals("user"))
+		if err != nil {
+			return apierr.Write(c, fiber.StatusUnauthorized, "invalid_token_claims", err.Error())
+		}
+
+		if err := guildService.RemoveMember(c.UserContext(), uint(guildID64), actorID, targetID); err != nil {
+			if errors.Is(err, service.ErrGuildAccessDenied) {
+				return apierr.Write(c, fiber.StatusForbidden, "guild_access_denied", "Пользователь не состоит в гильдии")
+			}
+			if errors.Is(err, service.ErrMissingManageGuild) {
+				return apierr.Write(c, fiber.StatusForbidden, "missing_manage_guild_permission", "Недостаточно прав для управления участниками")
+			}
+			if errors.Is(err, service.ErrCannotRemoveOwner) {
+				return apierr.Write(c, fiber.StatusForbidden, "cannot_remove_owner", "Нельзя удалить владельца сервера")
+			}
+			if errors.Is(err, service.ErrMemberNotFound) {
+				return apierr.Write(c, fiber.StatusNotFound, "member_not_found", "Участник не найден")
+			}
+			if errors.Is(err, service.ErrGuildNotFound) {
+				return apierr.Write(c, fiber.StatusNotFound, "guild_not_found", "Сервер не найден")
+			}
+			return apierr.Write(c, fiber.StatusBadRequest, "member_remove_failed", err.Error())
+		}
+		return c.JSON(fiber.Map{"ok": true})
+	})
+
 	api.Post("/guilds/:guildID/channels", middleware.JWTProtected(cfg.JWT.Secret), middleware.GuildAccess(guildRepo), func(c *fiber.Ctx) error {
 		guildID64, err := strconv.ParseUint(c.Params("guildID"), 10, 32)
 		if err != nil {
@@ -262,6 +443,75 @@ func main() {
 		return c.JSON(fiber.Map{"channels": channels})
 	})
 
+	api.Patch("/guilds/:guildID/channels/:channelID", middleware.JWTProtected(cfg.JWT.Secret), middleware.GuildAccess(guildRepo), func(c *fiber.Ctx) error {
+		guildID64, err := strconv.ParseUint(c.Params("guildID"), 10, 32)
+		if err != nil {
+			return apierr.Write(c, fiber.StatusBadRequest, "invalid_guild_id", "Guild ID has invalid format")
+		}
+		channelID64, err := strconv.ParseUint(c.Params("channelID"), 10, 32)
+		if err != nil {
+			return apierr.Write(c, fiber.StatusBadRequest, "invalid_channel_id", "Channel ID has invalid format")
+		}
+
+		var req UpdateChannelDTO
+		if err := c.BodyParser(&req); err != nil {
+			return apierr.Write(c, fiber.StatusBadRequest, "invalid_body", "Некорректный JSON запроса")
+		}
+		if err := validate.Struct(req); err != nil {
+			return apierr.Write(c, fiber.StatusBadRequest, "validation_failed", err.Error())
+		}
+
+		userID, err := middleware.ExtractUserIDFromClaims(c.Locals("user"))
+		if err != nil {
+			return apierr.Write(c, fiber.StatusUnauthorized, "invalid_token_claims", err.Error())
+		}
+
+		channel, err := channelService.UpdateChannel(c.UserContext(), uint(guildID64), uint(channelID64), userID, req.Name, req.Type)
+		if err != nil {
+			if errors.Is(err, service.ErrChannelAccessDenied) {
+				return apierr.Write(c, fiber.StatusForbidden, "channel_access_denied", "Пользователь не состоит в гильдии")
+			}
+			if errors.Is(err, service.ErrMissingManageChannels) {
+				return apierr.Write(c, fiber.StatusForbidden, "missing_manage_channels_permission", "Недостаточно прав для изменения канала")
+			}
+			if errors.Is(err, service.ErrChannelNotFoundInGuild) {
+				return apierr.Write(c, fiber.StatusNotFound, "channel_not_found", "Канал не найден в этом сервере")
+			}
+			return apierr.Write(c, fiber.StatusBadRequest, "channel_update_failed", err.Error())
+		}
+		return c.JSON(channel)
+	})
+
+	api.Delete("/guilds/:guildID/channels/:channelID", middleware.JWTProtected(cfg.JWT.Secret), middleware.GuildAccess(guildRepo), func(c *fiber.Ctx) error {
+		guildID64, err := strconv.ParseUint(c.Params("guildID"), 10, 32)
+		if err != nil {
+			return apierr.Write(c, fiber.StatusBadRequest, "invalid_guild_id", "Guild ID has invalid format")
+		}
+		channelID64, err := strconv.ParseUint(c.Params("channelID"), 10, 32)
+		if err != nil {
+			return apierr.Write(c, fiber.StatusBadRequest, "invalid_channel_id", "Channel ID has invalid format")
+		}
+
+		userID, err := middleware.ExtractUserIDFromClaims(c.Locals("user"))
+		if err != nil {
+			return apierr.Write(c, fiber.StatusUnauthorized, "invalid_token_claims", err.Error())
+		}
+
+		if err := channelService.DeleteChannel(c.UserContext(), uint(guildID64), uint(channelID64), userID); err != nil {
+			if errors.Is(err, service.ErrChannelAccessDenied) {
+				return apierr.Write(c, fiber.StatusForbidden, "channel_access_denied", "Пользователь не состоит в гильдии")
+			}
+			if errors.Is(err, service.ErrMissingManageChannels) {
+				return apierr.Write(c, fiber.StatusForbidden, "missing_manage_channels_permission", "Недостаточно прав для удаления канала")
+			}
+			if errors.Is(err, service.ErrChannelNotFoundInGuild) {
+				return apierr.Write(c, fiber.StatusNotFound, "channel_not_found", "Канал не найден в этом сервере")
+			}
+			return apierr.Write(c, fiber.StatusBadRequest, "channel_delete_failed", err.Error())
+		}
+		return c.JSON(fiber.Map{"ok": true})
+	})
+
 	api.Get("/guilds/:guildID/channels/:channelID/messages", middleware.JWTProtected(cfg.JWT.Secret), middleware.GuildAccess(guildRepo), func(c *fiber.Ctx) error {
 		guildID, err := strconv.ParseUint(c.Params("guildID"), 10, 32)
 		if err != nil {
@@ -296,6 +546,9 @@ func main() {
 			parsedLimit, parseErr := strconv.Atoi(rawLimit)
 			if parseErr != nil || parsedLimit <= 0 {
 				return apierr.Write(c, fiber.StatusBadRequest, "invalid_limit", "Параметр limit должен быть положительным числом")
+			}
+			if parsedLimit > 100 {
+				return apierr.Write(c, fiber.StatusBadRequest, "invalid_limit", "Параметр limit не может быть больше 100")
 			}
 			limit = parsedLimit
 		}
@@ -392,7 +645,7 @@ func main() {
 
 		token, err := voiceService.JoinRoom(c.UserContext(), userID, req.GuildID, req.RoomName)
 		if err != nil {
-			if err.Error() == "voice access denied" {
+			if errors.Is(err, service.ErrVoiceAccessDenied) {
 				return apierr.Write(c, fiber.StatusForbidden, "voice_access_denied", "Пользователь не состоит в гильдии")
 			}
 			return apierr.Write(c, fiber.StatusBadRequest, "voice_token_failed", err.Error())
@@ -419,7 +672,7 @@ func main() {
 		}
 
 		if err := voiceService.LeaveRoom(c.UserContext(), userID, req.GuildID, req.RoomName); err != nil {
-			if err.Error() == "voice access denied" {
+			if errors.Is(err, service.ErrVoiceAccessDenied) {
 				return apierr.Write(c, fiber.StatusForbidden, "voice_access_denied", "Пользователь не состоит в гильдии")
 			}
 			return apierr.Write(c, fiber.StatusBadRequest, "voice_leave_failed", err.Error())
@@ -488,6 +741,16 @@ func main() {
 					_ = c.WriteMessage(websocket.TextMessage, []byte(`{"event":"ERROR","payload":{"message":"access denied"}}`))
 					continue
 				}
+				perms, err := guildRepo.GetMemberPermissions(context.Background(), guildID, userID)
+				if err != nil {
+					_ = c.WriteMessage(websocket.TextMessage, []byte(`{"event":"ERROR","payload":{"message":"access denied"}}`))
+					continue
+				}
+				member := domain.GuildMember{Permissions: perms}
+				if !member.HasPermission(domain.PermViewChannel) {
+					_ = c.WriteMessage(websocket.TextMessage, []byte(`{"event":"ERROR","payload":{"message":"access denied"}}`))
+					continue
+				}
 				if err := hub.Subscribe(c, channelID); err != nil {
 					_ = c.WriteMessage(websocket.TextMessage, []byte(`{"event":"ERROR","payload":{"message":"subscribe failed"}}`))
 					continue
@@ -530,10 +793,11 @@ func main() {
 					})
 					continue
 				}
-				_ = c.WriteMessage(
-					websocket.TextMessage,
-					[]byte(fmt.Sprintf(`{"type":"error","payload":{"message":"%s"}}`, processErr.Error())),
-				)
+				errPayload, _ := json.Marshal(fiber.Map{
+					"type":    "error",
+					"payload": fiber.Map{"message": processErr.Error()},
+				})
+				_ = c.WriteMessage(websocket.TextMessage, errPayload)
 			}
 		}
 	}))
@@ -567,6 +831,21 @@ type JoinGuildDTO struct {
 type CreateChannelDTO struct {
 	Name string `json:"name" validate:"required,min=1,max=64"`
 	Type string `json:"type" validate:"omitempty,oneof=text voice"`
+}
+
+type UpdateChannelDTO struct {
+	Name *string `json:"name" validate:"omitempty,min=1,max=64"`
+	Type *string `json:"type" validate:"omitempty,oneof=text voice"`
+}
+
+type UpdateGuildDTO struct {
+	Name        *string `json:"name" validate:"omitempty,min=3,max=32"`
+	IconURL     *string `json:"icon_url" validate:"omitempty,max=512"`
+	Description *string `json:"description" validate:"omitempty,max=512"`
+}
+
+type AddMemberDTO struct {
+	Username string `json:"username" validate:"required,min=3,max=32"`
 }
 
 type CreateMessageDTO struct {

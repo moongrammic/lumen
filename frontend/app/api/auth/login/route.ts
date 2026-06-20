@@ -1,8 +1,9 @@
 import { NextResponse } from "next/server";
-
-const backendUrl = process.env.BACKEND_URL ?? "http://localhost:8080";
+import { setAuthCookie } from "@/lib/auth-cookie";
+import { getBackendUrl } from "@/lib/server-backend";
 
 export async function POST(request: Request) {
+  const backendUrl = getBackendUrl();
   const body = await request.json();
 
   const upstream = await fetch(`${backendUrl}/api/auth/login`, {
@@ -23,15 +24,6 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "missing_token" }, { status: 502 });
   }
 
-  response.cookies.set({
-    name: "access_token",
-    value: accessToken,
-    httpOnly: true,
-    sameSite: "lax",
-    secure: process.env.NODE_ENV === "production",
-    path: "/",
-    maxAge: 60 * 60 * 24 * 7,
-  });
-
+  setAuthCookie(response, accessToken);
   return response;
 }

@@ -1,5 +1,7 @@
 FROM golang:1.25-alpine
 
+RUN apk add --no-cache wget
+
 WORKDIR /app
 
 # 1. Копируем зависимости
@@ -12,7 +14,7 @@ COPY . .
 RUN go mod tidy && go mod download
 
 # 4. СОБИРАЕМ В ПАПКУ /usr/local/bin (её не перекроет Volume!)
-RUN go build -o /usr/local/bin/lumen-app ./cmd/api/main.go
+RUN go build -o /usr/local/bin/lumen-app ./cmd/api
 RUN chmod +x /usr/local/bin/lumen-app
 
 EXPOSE 8080

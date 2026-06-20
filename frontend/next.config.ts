@@ -1,20 +1,7 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  async rewrites() {
-    const backendUrl = process.env.BACKEND_URL ?? process.env.NEXT_PUBLIC_API_URL?.replace(/\/api$/, "");
-
-    if (!backendUrl) {
-      return [];
-    }
-
-    return [
-      {
-        source: "/api/:path*",
-        destination: `${backendUrl}/api/:path*`,
-      },
-    ];
-  },
+  // API proxying is handled at runtime by app/api/[...path]/route.ts and app/api/auth/* routes.
 };
 
 export default nextConfig;

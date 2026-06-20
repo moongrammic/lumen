@@ -124,6 +124,7 @@ class SocketClient {
       this.outboundQueue.push(raw);
       return;
     }
+    toast.error("Not connected to chat server");
   }
 
   private flushOutbound() {
@@ -184,9 +185,6 @@ class SocketClient {
           toast.error(p.message ?? "Identify failed");
           this.disconnect();
           void useAuthStore.getState().logout();
-          if (typeof window !== "undefined") {
-            window.location.assign("/login");
-          }
           return;
         }
         const text =

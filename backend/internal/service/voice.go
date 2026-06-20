@@ -20,6 +20,8 @@ type VoiceService struct {
 	apiSecret string
 }
 
+var ErrVoiceAccessDenied = errors.New("voice access denied")
+
 func NewVoiceService(guilds VoiceAccessChecker, hub ChatBroadcaster, apiKey string, apiSecret string) *VoiceService {
 	return &VoiceService{
 		guilds:    guilds,
@@ -42,7 +44,7 @@ func (s *VoiceService) GenerateJoinToken(ctx context.Context, userID uuid.UUID, 
 		return "", err
 	}
 	if !ok {
-		return "", errors.New("voice access denied")
+		return "", ErrVoiceAccessDenied
 	}
 
 	token := lkauth.NewAccessToken(s.apiKey, s.apiSecret)
@@ -84,7 +86,7 @@ func (s *VoiceService) LeaveRoom(ctx context.Context, userID uuid.UUID, guildID 
 		return err
 	}
 	if !ok {
-		return errors.New("voice access denied")
+		return ErrVoiceAccessDenied
 	}
 
 	return s.hub.Broadcast(Event{

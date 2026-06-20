@@ -7,6 +7,8 @@ function channelKey(channelId: number): string {
   return String(channelId);
 }
 
+const typingTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
 type ChatState = {
   messagesByChannel: Record<string, ChatMessage[]>;
   upsertMessage: (message: ChatMessage) => void;
@@ -29,19 +31,44 @@ export const useChatStore = create<ChatState>((set) => ({
     set((state) => {
       const key = channelKey(message.channel_id);
       const items = state.messagesByChannel[key] ?? [];
-      const exists = items.some((item) => item.id === message.id);
+      const index = items.findIndex((item) => item.id === message.id);
+      if (index >= 0) {
+        const next = [...items];
+        next[index] = message;
+        return { messagesByChannel: { ...state.messagesByChannel, [key]: next } };
+      }
       return {
         messagesByChannel: {
           ...state.messagesByChannel,
-          [key]: exists ? items : [...items, message],
+          [key]: [...items, message],
         },
       };
     }),
-  setTypingUser: (channelId, userId) =>
+  setTypingUser: (channelId, userId) => {
+    const key = channelKey(channelId);
+    const existing = typingTimers.get(key);
+    if (existing) clearTimeout(existing);
+
     set((state) => ({
       typingByChannel: {
         ...state.typingByChannel,
-        [channelKey(channelId)]: userId,
+        [key]: userId,
       },
-    })),
+    }));
+
+    if (userId) {
+      typingTimers.set(
+        key,
+        setTimeout(() => {
+          typingTimers.delete(key);
+          set((state) => ({
+            typingByChannel: {
+              ...state.typingByChannel,
+              [key]: null,
+            },
+          }));
+        }, 5000),
+      );
+    }
+  },
 }));

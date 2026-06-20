@@ -1,8 +1,9 @@
 import { NextResponse } from "next/server";
-
-const backendUrl = process.env.BACKEND_URL ?? "http://localhost:8080";
+import { setAuthCookie } from "@/lib/auth-cookie";
+import { getBackendUrl } from "@/lib/server-backend";
 
 export async function POST(request: Request) {
+  const backendUrl = getBackendUrl();
   const body = await request.json();
 
   const upstream = await fetch(`${backendUrl}/api/auth/register`, {
@@ -12,5 +13,16 @@ export async function POST(request: Request) {
   });
 
   const data = await upstream.json().catch(() => null);
-  return NextResponse.json(data ?? { error: "invalid_upstream" }, { status: upstream.status });
+  const response = NextResponse.json(data ?? { error: "invalid_upstream" }, { status: upstream.status });
+
+  if (!upstream.ok) {
+    return response;
+  }
+
+  const accessToken = data?.token as string | undefined;
+  if (accessToken) {
+    setAuthCookie(response, accessToken);
+  }
+
+  return response;
 }
